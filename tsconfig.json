@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["pi-advisor/advisor.ts", "pi-thinking-command/thinking-shortcut.ts"]
+  "include": ["packages/pi-advisor/advisor.ts", "packages/pi-thinking-command/thinking-shortcut.ts"]
 }

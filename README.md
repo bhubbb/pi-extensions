@@ -8,12 +8,12 @@ Requires pi `>= 0.79.1` for the current release.
 
 | Extension | Description |
 |---|---|
-| [**pi-advisor**](./pi-advisor/) | A parameterless `advisor` tool that forwards the full conversation transcript to a stronger reviewer model for direct, actionable advice. |
-| [**pi-thinking-command**](./pi-thinking-command/) | Adds a `/thinking` slash command for changing the active thinking/reasoning level from inside a session. |
+| [**pi-advisor**](./packages/pi-advisor/) | A parameterless `advisor` tool that forwards the full conversation transcript to a stronger reviewer model for direct, actionable advice. |
+| [**pi-thinking-command**](./packages/pi-thinking-command/) | Adds a `/thinking` slash command for changing the active thinking/reasoning level from inside a session. |
 
 ## Installation
 
-### Via `pi install` (recommended)
+### Via `pi install` from GitHub (bundle)
 
 Install the entire collection via `pi install`:
 
@@ -39,14 +39,23 @@ This adds the package source to your pi settings (`~/.pi/agent/settings.json` un
 /reload
 ```
 
+### Via npm packages (individual extensions)
+
+Install individual extensions from npm:
+
+```bash
+pi install npm:@hk_net/pi-advisor
+pi install npm:@hk_net/pi-thinking-command
+```
+
 ### Manual install (fallback)
 
 Copy individual `.ts` files into pi's extensions directory:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
-cp pi-advisor/advisor.ts ~/.pi/agent/extensions/advisor.ts
-cp pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shortcut.ts
+cp packages/pi-advisor/advisor.ts ~/.pi/agent/extensions/advisor.ts
+cp packages/pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shortcut.ts
 ```
 
 ## Structure
@@ -55,12 +64,15 @@ cp pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shor
 pi-extensions/
 ├── package.json               # Pi package manifest
 ├── README.md
-├── pi-advisor/
-│   ├── README.md
-│   └── advisor.ts             # Canonical source
-└── pi-thinking-command/
-    ├── README.md
-    └── thinking-shortcut.ts   # Canonical source
+├── packages/
+│   ├── pi-advisor/
+│   │   ├── package.json       # npm package @hk_net/pi-advisor
+│   │   ├── README.md
+│   │   └── advisor.ts         # Canonical source
+│   └── pi-thinking-command/
+│       ├── package.json       # npm package @hk_net/pi-thinking-command
+│       ├── README.md
+│       └── thinking-shortcut.ts # Canonical source
 ```
 
 The root `package.json` declares the `pi.extensions` manifest so `pi install` can load the declared `.ts` extension files from the package. Each extension is self-contained: a single TypeScript module exporting the extension factory function and its own README for documentation.
@@ -71,7 +83,7 @@ The root `package.json` declares the `pi.extensions` manifest so `pi install` ca
 
 ## Developing
 
-1. Edit the `.ts` source in the extension's directory.
+1. Edit the `.ts` source in the extension's package directory.
 2. Run `npm test` and `npm run typecheck`.
 3. Re-deploy with `pi install /path/to/pi-extensions` (or copy manually and run `/reload`).
 4. See each extension's README for configuration options and usage details.

@@ -1,9 +1,12 @@
 {
   "name": "pi-extensions",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Pi agent extensions: advisor tool and thinking command",
   "type": "module",
   "private": false,
+  "workspaces": [
+    "packages/*"
+  ],
   "keywords": [
     "pi-package",
     "pi",
@@ -20,8 +23,8 @@
   },
   "homepage": "https://github.com/hknet/pi-extensions",
   "files": [
-    "pi-advisor",
-    "pi-thinking-command",
+    "packages/pi-advisor",
+    "packages/pi-thinking-command",
     "README.md"
   ],
   "peerDependencies": {
@@ -38,8 +41,8 @@
   },
   "pi": {
     "extensions": [
-      "./pi-advisor/advisor.ts",
-      "./pi-thinking-command/thinking-shortcut.ts"
+      "./packages/pi-advisor/advisor.ts",
+      "./packages/pi-thinking-command/thinking-shortcut.ts"
     ]
   },
   "scripts": {

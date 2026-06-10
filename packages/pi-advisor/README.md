@@ -32,27 +32,29 @@ Beyond the callable tool, the extension provides two additional ways to get advi
 - `advisor.ts` — canonical source (this repo).
 - Package-installed copy: loaded from this package's `pi.extensions` manifest after `pi install`.
 
-Install the full collection via `pi install`:
+Install just this extension from npm:
+
+```bash
+pi install npm:@hk_net/pi-advisor
+```
+
+Or install the full collection from GitHub:
 
 ```bash
 pi install git:git@github.com:hknet/pi-extensions@main
-```
-
-Or via HTTPS:
-
-```bash
 pi install https://github.com/hknet/pi-extensions
 ```
 
 Or install manually (copy just this extension):
 
 ```bash
-cp pi-advisor/advisor.ts ~/.pi/agent/extensions/advisor.ts
+cp packages/pi-advisor/advisor.ts ~/.pi/agent/extensions/advisor.ts
 ```
 
-> When installed as a package, pi loads `advisor.ts` through the root `package.json`
-> `pi.extensions` manifest. If you manually copy the file instead, that copied production file is
-> separate from this source; re-copy it after edits and run `/reload`.
+> When installed as an npm package, pi loads `advisor.ts` through this package's `pi.extensions`
+> manifest. When installed through the GitHub collection, pi loads it through the root package
+> manifest. If you manually copy the file instead, that copied production file is separate from this
+> source; re-copy it after edits and run `/reload`.
 
 ## Configuration
 

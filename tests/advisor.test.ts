@@ -10,7 +10,7 @@ import {
   resolveAdviseMode,
   truncate,
   validateAdvisorConfig,
-} from "../pi-advisor/advisor.js";
+} from "../packages/pi-advisor/advisor.js";
 
 test("parseSpec accepts provider/id and rejects malformed specs", () => {
   assert.deepEqual(parseSpec("openai/gpt-5"), { provider: "openai", id: "gpt-5" });

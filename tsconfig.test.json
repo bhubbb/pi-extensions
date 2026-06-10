@@ -7,5 +7,5 @@
     "sourceMap": false,
     "declaration": false
   },
-  "include": ["pi-advisor/advisor.ts", "tests/**/*.test.ts"]
+  "include": ["packages/pi-advisor/advisor.ts", "tests/**/*.test.ts"]
 }

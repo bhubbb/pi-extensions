@@ -8,22 +8,23 @@ This is especially useful when switching between model classes. Smaller models, 
 
 ## Install
 
-Install the full collection via `pi install`:
+Install just this extension from npm:
+
+```bash
+pi install npm:@hk_net/pi-thinking-command
+```
+
+Or install the full collection from GitHub:
 
 ```bash
 pi install git:git@github.com:hknet/pi-extensions@main
-```
-
-Or via HTTPS:
-
-```bash
 pi install https://github.com/hknet/pi-extensions
 ```
 
 Or install this extension manually:
 
 ```bash
-cp pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shortcut.ts
+cp packages/pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shortcut.ts
 ```
 
 After installing, restart pi or run:
