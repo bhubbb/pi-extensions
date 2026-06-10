@@ -1,0 +1,11 @@
+node_modules/
+.pi/
+.env
+.env.*
+*.log
+coverage/
+*.tgz
+*.js
+*.js.map
+*.tsbuildinfo
+.tmp-*/

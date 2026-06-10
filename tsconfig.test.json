@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".tmp-test",
+    "rootDir": ".",
+    "sourceMap": false,
+    "declaration": false
+  },
+  "include": ["pi-advisor/advisor.ts", "tests/**/*.test.ts"]
+}
