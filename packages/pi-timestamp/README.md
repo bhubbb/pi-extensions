@@ -4,10 +4,14 @@ Shows timestamps for user input and agent completion timing.
 
 ## What it does
 
-- **User input**: Shows `Sent HH:MM:SS` after each user message
-- **Agent completion**: Shows `Done at HH:MM:SS · duration` after each agent turn (e.g., `Done at 14:32:05 · 3.2s`)
+- **User input**: Shows `Sent HH:MM:SS` in the footer status bar after each user message
+- **Agent completion**: Shows `Done at HH:MM:SS · duration` in the footer status bar after each agent turn (e.g., `Done at 14:32:05 · 3.2s`)
 
-All timestamps are **display-only** — they are sent as custom messages that never enter the LLM context.
+All timestamps are **display-only** — they are shown via the footer status bar and never enter the LLM context.
+
+## Display behavior
+
+Timestamps appear in the **footer/status bar**, not inline in the conversation transcript. This avoids polluting the model context while still providing visible timing information. If you want inline transcript timestamps, that would require modifying message content (which the current implementation avoids).
 
 ## Installation
 
