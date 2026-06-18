@@ -47,6 +47,7 @@ Install individual extensions from npm:
 ```bash
 pi install npm:@hk_net/pi-advisor
 pi install npm:@hk_net/pi-thinking-command
+pi install npm:@hk_net/pi-timestamp
 ```
 
 ### Manual install (fallback)
@@ -57,6 +58,7 @@ Copy individual `.ts` files into pi's extensions directory:
 mkdir -p ~/.pi/agent/extensions
 cp packages/pi-advisor/advisor.ts ~/.pi/agent/extensions/advisor.ts
 cp packages/pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shortcut.ts
+cp packages/pi-timestamp/timestamp.ts ~/.pi/agent/extensions/timestamp.ts
 ```
 
 ## Structure
@@ -70,10 +72,14 @@ pi-extensions/
 │   │   ├── package.json       # npm package @hk_net/pi-advisor
 │   │   ├── README.md
 │   │   └── advisor.ts         # Canonical source
-│   └── pi-thinking-command/
-│       ├── package.json       # npm package @hk_net/pi-thinking-command
+│   ├── pi-thinking-command/
+│   │   ├── package.json       # npm package @hk_net/pi-thinking-command
+│   │   ├── README.md
+│   │   └── thinking-shortcut.ts # Canonical source
+│   └── pi-timestamp/
+│       ├── package.json       # npm package @hk_net/pi-timestamp
 │       ├── README.md
-│       └── thinking-shortcut.ts # Canonical source
+│       └── timestamp.ts       # Canonical source
 ```
 
 The root `package.json` declares the `pi.extensions` manifest so `pi install` can load the declared `.ts` extension files from the package. Each extension is self-contained: a single TypeScript module exporting the extension factory function and its own README for documentation.
