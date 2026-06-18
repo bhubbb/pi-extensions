@@ -10,6 +10,7 @@ Requires pi `>= 0.79.1` for the current release.
 |---|---|
 | [**pi-advisor**](./packages/pi-advisor/) | A parameterless `advisor` tool that forwards the full conversation transcript to a stronger reviewer model for direct, actionable advice. |
 | [**pi-thinking-command**](./packages/pi-thinking-command/) | Adds a `/thinking` slash command for changing the active thinking/reasoning level from inside a session. |
+| [**pi-timestamp**](./packages/pi-timestamp/) | Shows timestamps for user input (`Sent HH:MM:SS`) and agent completion timing (`Done at HH:MM:SS · duration`). |
 
 ## Installation
 

@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "version": "0.2.0",
-  "description": "Pi agent extensions: advisor tool and thinking command",
+  "description": "Pi agent extensions: advisor tool, thinking command, and timestamp display",
   "type": "module",
   "private": false,
   "workspaces": [
@@ -25,6 +25,7 @@
   "files": [
     "packages/pi-advisor",
     "packages/pi-thinking-command",
+    "packages/pi-timestamp",
     "README.md"
   ],
   "peerDependencies": {
@@ -42,7 +43,8 @@
   "pi": {
     "extensions": [
       "./packages/pi-advisor/advisor.ts",
-      "./packages/pi-thinking-command/thinking-shortcut.ts"
+      "./packages/pi-thinking-command/thinking-shortcut.ts",
+      "./packages/pi-timestamp/timestamp.ts"
     ]
   },
   "scripts": {
