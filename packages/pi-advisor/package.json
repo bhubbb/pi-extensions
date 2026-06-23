@@ -1,6 +1,6 @@
 {
   "name": "@hk_net/pi-advisor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi advisor extension: consult a configured reviewer model on the full conversation transcript",
   "type": "module",
   "private": false,
@@ -27,9 +27,9 @@
     "CHANGELOG.md"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.79.10",
-    "@earendil-works/pi-coding-agent": ">=0.79.10",
-    "@earendil-works/pi-tui": ">=0.79.10"
+    "@earendil-works/pi-ai": ">=0.80.1",
+    "@earendil-works/pi-coding-agent": ">=0.80.1",
+    "@earendil-works/pi-tui": ">=0.80.1"
   },
   "pi": {
     "extensions": [

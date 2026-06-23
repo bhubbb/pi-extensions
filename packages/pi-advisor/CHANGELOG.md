@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 - 2026-06-23
+
+### Changed
+
+- Bumped package and pi peer/dev dependencies to `0.80.1`.
+- Updated advisor completion calls to import the compatibility helper from `@earendil-works/pi-ai/compat`, matching pi-ai `0.80.1`.
+
 ## 0.1.1
 
 ### Changed

@@ -151,7 +151,7 @@ tool's `promptGuidelines`. Two opt-in deterministic triggers, configurable per p
 ## Implementation notes (pi extension API)
 
 - **Call a model from an extension:** `complete(model, { systemPrompt, messages }, { apiKey, headers,
-  signal, reasoningEffort, maxTokens })` from `@earendil-works/pi-ai`. Resolve auth with
+  signal, reasoningEffort, maxTokens })` from `@earendil-works/pi-ai/compat`. Resolve auth with
   `ctx.modelRegistry.find(provider, id)` → `await ctx.modelRegistry.getApiKeyAndHeaders(model)`
   (`{ ok, apiKey, headers }`). `getAvailable()` lists only auth-configured models; `ctx.model` is the
   current one; `Model` carries `.contextWindow` / `.maxTokens`. `reasoningEffort` is a passthrough
@@ -168,4 +168,5 @@ tool's `promptGuidelines`. Two opt-in deterministic triggers, configurable per p
   also layers a `ctx.ui.addAutocompleteProvider()` on `session_start` so `/advisor ...` and
   `/advise ...` completions replace the whole argument segment and suppress irrelevant path
   completion while typing command arguments (pi ≥ 0.79.1).
-- The package's `examples/extensions/summarize.ts` is the canonical reference for `complete()`.
+- The package's `examples/extensions/summarize.ts` remains the canonical extension reference; with pi-ai
+  `0.80.1`, import legacy `complete()` calls from `@earendil-works/pi-ai/compat`.
