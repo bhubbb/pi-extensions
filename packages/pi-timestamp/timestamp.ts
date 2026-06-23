@@ -32,11 +32,18 @@ function formatDuration(ms: number): string {
     return `${Math.floor(hrs)}h ${Math.floor(totalMins % 60)}m`;
 }
 
+function isTimeoutErrorMessage(message: string | undefined): boolean {
+    return /timed? out|timeout/i.test(message ?? "");
+}
+
 export default function (pi: ExtensionAPI) {
     let taskStartTime: number | undefined;
+    let waitingForRetryAfterTimeout = false;
 
-    // Track when the agent starts processing
+    // Track when the agent starts processing. If Pi is auto-retrying after a timeout,
+    // keep the original start time so the eventual completion covers the full task.
     pi.on("agent_start", async () => {
+        if (waitingForRetryAfterTimeout) return;
         taskStartTime = Date.now();
     });
 
@@ -46,16 +53,33 @@ export default function (pi: ExtensionAPI) {
     pi.on("message_end", async (event, ctx) => {
         if (event.message.role !== "user") return;
 
+        if (waitingForRetryAfterTimeout) {
+            taskStartTime = undefined;
+            waitingForRetryAfterTimeout = false;
+        }
+
         const ts = event.message.timestamp;
         if (!ts) return;
 
         ctx.ui.notify(`Sent ${formatTime(ts)}`, "info");
     });
 
-    // Show completion timing after agent finishes
-    pi.on("agent_end", async (_event, ctx) => {
+    // Show completion timing after the whole task finishes. If Pi ended this agent loop
+    // with a timeout error and will likely auto-retry, wait for the later completion.
+    pi.on("agent_end", async (event, ctx) => {
+        const lastAssistantMessage = [...event.messages].reverse().find((message) => message.role === "assistant");
+        if (
+            lastAssistantMessage?.role === "assistant" &&
+            lastAssistantMessage.stopReason === "error" &&
+            isTimeoutErrorMessage(lastAssistantMessage.errorMessage)
+        ) {
+            waitingForRetryAfterTimeout = true;
+            return;
+        }
+
         const startTime = taskStartTime;
         taskStartTime = undefined;
+        waitingForRetryAfterTimeout = false;
 
         if (startTime === undefined) return;
 
