@@ -1,6 +1,6 @@
 {
   "name": "pi-extensions",
-  "version": "0.2.5",
+  "version": "0.2.4",
   "description": "Pi agent extensions: advisor tool, thinking command, and timestamp display",
   "type": "module",
   "private": false,
