@@ -4,8 +4,8 @@
  * Displays timestamps for user input and agent completion timing.
  * All timestamps are display-only — they never enter the LLM context.
  *
- * - Shows `[Sent HH:MM:SS]` after each user message (footer status)
- * - Shows `Done at HH:MM:SS · duration` after each agent turn (footer status)
+ * - Shows `Sent HH:MM:SS` after each user message in the chat UI
+ * - Shows `Done at HH:MM:SS · duration` after each agent turn in the chat UI
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -36,20 +36,20 @@ export default function (pi: ExtensionAPI) {
     let taskStartTime: number | undefined;
 
     // Track when the agent starts processing
-    pi.on("agent_start", async (_event, ctx) => {
+    pi.on("agent_start", async () => {
         taskStartTime = Date.now();
-        // Clear any previous completion message
-        ctx.ui.setStatus("timestamp", undefined);
     });
 
-    // Show "Sent HH:MM:SS" after each user message
+    // Show "Sent HH:MM:SS" after each user message.
+    // notify(..., "info") renders a display-only status line in the TUI chat; it is not
+    // appended to the session and does not enter the LLM context.
     pi.on("message_end", async (event, ctx) => {
         if (event.message.role !== "user") return;
 
         const ts = event.message.timestamp;
         if (!ts) return;
 
-        ctx.ui.setStatus("timestamp", ctx.ui.theme.fg("dim", `Sent ${formatTime(ts)}`));
+        ctx.ui.notify(`Sent ${formatTime(ts)}`, "info");
     });
 
     // Show completion timing after agent finishes
@@ -62,6 +62,6 @@ export default function (pi: ExtensionAPI) {
         const endTime = Date.now();
         const duration = endTime - startTime;
 
-        ctx.ui.setStatus("timestamp", ctx.ui.theme.fg("dim", `Done at ${formatTime(endTime)} · ${formatDuration(duration)}`));
+        ctx.ui.notify(`Done at ${formatTime(endTime)} · ${formatDuration(duration)}`, "info");
     });
 }
