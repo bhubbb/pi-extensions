@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-06-24
+
+### Changed
+
+- Bumped pi peer dependencies to `>=0.80.2`.
+
 ## 0.1.2 - 2026-06-23
 
 ### Changed
