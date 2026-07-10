@@ -1,37 +1,37 @@
-# pi-extensions
+# pi-advisor-ext
 
-Collection of [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) extensions — small, self-contained plugins that add tools, commands, and automatic behaviors to the pi coding agent.
+A [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) extension that adds an `advisor` tool with a configurable context policy — send a summary + tail of the conversation to a stronger reviewer model instead of the full transcript, drastically reducing token waste for local LLM advisors.
 
-Requires pi `>= 0.80.2` for the current release.
+## Attribution
 
-## Extensions
+This project is a fork of [`hknet/pi-extensions`](https://github.com/hknet/pi-extensions) by [hknet](https://github.com/hknet), specifically the `pi-advisor` package. The upstream `advisor` tool, automatic triggers (`onDone`, `whenStuck`), and `/advise` UX are preserved. Licensed under the EUPL-1.2 (same as upstream).
 
-| Extension | Description |
-|---|---|
-| [**pi-advisor**](./packages/pi-advisor/) | A parameterless `advisor` tool that forwards the full conversation transcript to a stronger reviewer model for direct, actionable advice. |
-| [**pi-thinking-command**](./packages/pi-thinking-command/) | Adds a `/thinking` slash command for changing the active thinking/reasoning level from inside a session. |
-| [**pi-timestamp**](./packages/pi-timestamp/) | Shows timestamps for user input (`Sent HH:MM:SS`) and agent completion timing (`Done at HH:MM:SS · duration`). |
+## What changed from upstream
+
+- **Configurable context policy**: instead of always sending the full transcript, choose between `full`, `tail`, `summary`, or `summary+tail` modes
+- **Summary pre-call**: a rolling summary is generated (and cached, refreshed every N messages) so the advisor sees a compressed view of the whole conversation plus recent messages
+- **Changed-files/diff digest**: patches are harvested from `tool_result` events and included in the advisor payload
+- **`always` trigger**: new auto-mode that runs the advisor before the agent processes each user input
+- **Reasoning stripping**: thinking/reasoning blocks are stripped by default to save tokens
 
 ## Installation
 
-### Via `pi install` from GitHub (bundle)
-
-Install the entire collection via `pi install`:
+### Via `pi install` from GitHub
 
 ```bash
-pi install git:git@github.com:hknet/pi-extensions@main
+pi install git:git@github.com:bhubbb/pi-advisor-ext@main
 ```
 
 Or via HTTPS:
 
 ```bash
-pi install https://github.com/hknet/pi-extensions
+pi install https://github.com/bhubbb/pi-advisor-ext
 ```
 
 Or install from a local checkout:
 
 ```bash
-pi install /path/to/pi-extensions
+pi install /path/to/pi-advisor-ext
 ```
 
 This adds the package source to your pi settings (`~/.pi/agent/settings.json` under `packages`). Pi loads the extension files declared in this package's `package.json` `pi.extensions` manifest. Restart pi if needed, or reload the session with:
@@ -40,57 +40,40 @@ This adds the package source to your pi settings (`~/.pi/agent/settings.json` un
 /reload
 ```
 
-### Via npm packages (individual extensions)
+## Configuration
 
-Install individual extensions from npm:
+`advisor.json` (project: `<cwd>/.pi/advisor.json`, or global: `~/.pi/agent/advisor.json`):
 
-```bash
-pi install npm:@hk_net/pi-advisor
-pi install npm:@hk_net/pi-thinking-command
-pi install npm:@hk_net/pi-timestamp
+```json
+{
+  "model": "provider/id",
+  "summaryModel": "provider/id",
+  "thinking": "high",
+  "onDone": true,
+  "always": true,
+  "whenStuck": 3,
+  "timeoutMs": 120000,
+
+  "contextMode": "summary+tail",
+  "tailMessages": 10,
+  "stripReasoning": true,
+  "keepToolResults": "recent",
+  "diffMode": "stat",
+  "diffMaxChars": 4000,
+  "summaryMaxTokens": 16384,
+  "summaryRefreshEvery": 8,
+  "summaryTimeoutMs": 60000
+}
 ```
 
-### Manual install (fallback)
-
-Copy individual `.ts` files into pi's extensions directory:
-
-```bash
-mkdir -p ~/.pi/agent/extensions
-cp packages/pi-advisor/advisor.ts ~/.pi/agent/extensions/advisor.ts
-cp packages/pi-thinking-command/thinking-shortcut.ts ~/.pi/agent/extensions/thinking-shortcut.ts
-cp packages/pi-timestamp/timestamp.ts ~/.pi/agent/extensions/timestamp.ts
-```
-
-## Structure
-
-```
-pi-extensions/
-├── package.json               # Pi package manifest
-├── README.md
-├── packages/
-│   ├── pi-advisor/
-│   │   ├── package.json       # npm package @hk_net/pi-advisor
-│   │   ├── README.md
-│   │   └── advisor.ts         # Canonical source
-│   ├── pi-thinking-command/
-│   │   ├── package.json       # npm package @hk_net/pi-thinking-command
-│   │   ├── README.md
-│   │   └── thinking-shortcut.ts # Canonical source
-│   └── pi-timestamp/
-│       ├── package.json       # npm package @hk_net/pi-timestamp
-│       ├── README.md
-│       └── timestamp.ts       # Canonical source
-```
-
-The root `package.json` declares the `pi.extensions` manifest so `pi install` can load the declared `.ts` extension files from the package. Each extension is self-contained: a single TypeScript module exporting the extension factory function and its own README for documentation.
+See [packages/pi-advisor/](./packages/pi-advisor/) for full documentation.
 
 ## Privacy note
 
-`pi-advisor` can send the active conversation transcript — including reasoning, tool calls, arguments, and tool results — to a reviewer model. It does **not** send transcripts until you explicitly configure a trusted reviewer model with `/advisor`, project/global `advisor.json`, or `PI_ADVISOR_MODEL`. Use `/advise show` for UI-only feedback; bare `/advise` is optimized for quick intervention and injects advice into the conversation (`pipe` when idle, `steer` while running).
+`pi-advisor` can send conversation context — including reasoning, tool calls, arguments, and tool results — to a reviewer model. It does **not** send anything until you explicitly configure a trusted reviewer model with `/advisor`, `advisor.json`, or `PI_ADVISOR_MODEL`. Use `/advise show` for UI-only feedback; bare `/advise` is optimized for quick intervention and injects advice into the conversation (`pipe` when idle, `steer` while running).
 
 ## Developing
 
-1. Edit the `.ts` source in the extension's package directory.
+1. Edit the `.ts`/`.mjs` source in `packages/pi-advisor/`.
 2. Run `npm test` and `npm run typecheck`.
-3. Re-deploy with `pi install /path/to/pi-extensions` (or copy manually and run `/reload`).
-4. See each extension's README for configuration options and usage details.
+3. Re-deploy with `pi install /path/to/pi-advisor-ext` (or copy manually and run `/reload`).

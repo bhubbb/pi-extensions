@@ -1,7 +1,7 @@
 {
-  "name": "pi-extensions",
-  "version": "0.2.4",
-  "description": "Pi agent extensions: advisor tool, thinking command, and timestamp display",
+  "name": "pi-advisor-ext",
+  "version": "0.3.0",
+  "description": "Pi agent advisor extension with configurable context policy",
   "type": "module",
   "private": false,
   "workspaces": [
@@ -13,19 +13,17 @@
     "extension"
   ],
   "license": "EUPL-1.2",
-  "author": "hknet",
+  "author": "bhubbb",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hknet/pi-extensions.git"
+    "url": "git+https://github.com/bhubbb/pi-extensions.git"
   },
   "bugs": {
-    "url": "https://github.com/hknet/pi-extensions/issues"
+    "url": "https://github.com/bhubbb/pi-extensions/issues"
   },
-  "homepage": "https://github.com/hknet/pi-extensions",
+  "homepage": "https://github.com/bhubbb/pi-extensions",
   "files": [
     "packages/pi-advisor",
-    "packages/pi-thinking-command",
-    "packages/pi-timestamp",
     "README.md"
   ],
   "peerDependencies": {
@@ -42,9 +40,7 @@
   },
   "pi": {
     "extensions": [
-      "./packages/pi-advisor/advisor.ts",
-      "./packages/pi-thinking-command/thinking-shortcut.ts",
-      "./packages/pi-timestamp/timestamp.ts"
+      "./packages/pi-advisor/advisor.ts"
     ]
   },
   "scripts": {

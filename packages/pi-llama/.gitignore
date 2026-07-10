@@ -1,0 +1,6 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+.pi/npm/
+.pi/git/
+.pi/agent/pi-llama.json

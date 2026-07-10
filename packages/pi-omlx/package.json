@@ -1,0 +1,21 @@
+{
+	"name": "pi-omlx",
+	"version": "0.1.0",
+	"description": "oMLX Pi extension",
+	"type": "module",
+	"license": "MIT",
+	"keywords": ["pi-package", "pi-extension", "omlx", "mlx", "apple-silicon"],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/bhubbb/pi-omlx.git"
+	},
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": { "optional": true }
+	}
+}
