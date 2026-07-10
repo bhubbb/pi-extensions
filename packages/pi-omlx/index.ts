@@ -212,6 +212,7 @@ export default async function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Malformed build info: ${data.build_info}`, "warning");
 			}
 		},
+	});
 	const baseUrl = (process.env.OMLX_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
 	const apiKey = process.env.OMLX_API_KEY ?? DEFAULT_API_KEY;
 	// Sent on discovery requests (/v1/models, /props, /models/sse). A no-auth
