@@ -206,7 +206,11 @@ export async function fetchModelProps(
 
 		return {
 			contextWindow: typeof nCtx === "number" && nCtx > 0 ? nCtx : DEFAULT_CONTEXT_WINDOW,
-			maxTokens: typeof nCtx === "number" && nCtx > 0 ? Math.min(DEFAULT_MAX_TOKENS, nCtx) : DEFAULT_MAX_TOKENS,
+			// No output cap once we know the real n_ctx: llama.cpp has no real
+			// output-token limit, so let the model use its full context budget for
+			// generation (critical for thinking models where reasoning counts toward
+			// output). The 16384 DEFAULT_MAX_TOKENS stays as the pre-discovery fallback.
+			maxTokens: typeof nCtx === "number" && nCtx > 0 ? nCtx : DEFAULT_MAX_TOKENS,
 			supportsThinking,
 		};
 	} catch (err) {

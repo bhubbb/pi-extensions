@@ -333,12 +333,17 @@ export default async function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("model_select", (event, ctx) => {
+	pi.on("model_select", async (event, ctx) => {
 		const providerId = event.model.provider;
 		if (!providerId.startsWith("llama-cpp")) {
 			return;
 		}
-		void discoverModelProps(pi, providerId, event.model.id, ctx, true);
+		// Await props discovery so the real contextWindow + maxTokens are
+		// registered before the user sends their next message. Without awaiting,
+		// the first request after selection goes out with pre-discovery defaults
+		// (8192 ctx / 16384 out) and only gets corrected on request #2. autoload=true
+		// here is intentional — selecting a model should load it.
+		await discoverModelProps(pi, providerId, event.model.id, ctx, true);
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
