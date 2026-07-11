@@ -353,7 +353,10 @@ export default async function (pi: ExtensionAPI) {
 				// Find which backend this request is for
 				const activeModel = ctx.model;
 				if (activeModel && activeModel.provider?.startsWith("llama-cpp")) {
-					void discoverModelProps(pi, activeModel.provider, modelId, ctx, true);
+					// autoload=false: metadata-only. autoload=true would force the
+					// server to load a different model on every completion request,
+					// racing the in-flight request and churning the server.
+					void discoverModelProps(pi, activeModel.provider, modelId, ctx, false);
 				}
 			}
 		} catch (error) {
