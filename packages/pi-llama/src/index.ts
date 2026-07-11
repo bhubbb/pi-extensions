@@ -56,10 +56,14 @@ function modelsFromSettings(providerId: string): DiscoveredModel[] {
 	return enabled
 		.filter((id) => typeof id === "string" && id.startsWith(prefix))
 		.map((id) => {
-			// Strip provider prefix to get the model name
+			// Strip provider prefix to get the model name the server expects.
+			// The request body `model` field must be the bare server id, NOT the
+			// pi-scoped "llama-cpp-N/..." form — otherwise the server returns
+			// 400 model not found. Live discovery already uses the bare id, so the
+			// fallback must match it.
 			const modelName = id.slice(prefix.length);
 			return {
-				id,
+				id: modelName,
 				name: modelName,
 				reasoning: false,
 				input: ["text"] as const,

@@ -31,6 +31,18 @@ export function getModels(providerId: string): DiscoveredModel[] {
 	return state.models[providerId] ?? [];
 }
 
+/**
+ * Store the models registered for a backend.
+ *
+ * Why: getModels() previously always returned [] because nothing ever wrote
+ * into state.models. session_start then re-registered stale fallback models
+ * on top of the live-discovered ones, and discoverModelProps could never
+ * enrich metadata. Mirror whatever is registered so those paths see reality.
+ */
+export function setModels(providerId: string, models: DiscoveredModel[]): void {
+	state.models[providerId] = models;
+}
+
 export function getLastRefreshAt(providerId: string): number {
 	return state.lastRefreshAt[providerId] ?? 0;
 }
@@ -52,6 +64,10 @@ export function registerBackendProvider(
 	backend: ResolvedBackend,
 	models: DiscoveredModel[],
 ): void {
+	// Keep state.models in sync with what we register, so getModels() reflects
+	// reality instead of always returning [] (see setModels docs).
+	setModels(backend.providerId, models);
+
 	pi.registerProvider(backend.providerId, {
 		name: `llama.cpp${backend.providerId !== "llama-cpp" ? ` (${backend.baseUrl})` : ""}`,
 		baseUrl: backend.baseUrl,
