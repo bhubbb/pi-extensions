@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "../src/constants";
 import {
 	CONFIG_PATH,
 	CONFIG_VERSION,
@@ -79,6 +80,30 @@ describe("config resolution", () => {
 			expect(result.apiKey).toBe(DEFAULT_API_KEY);
 			expect(result.api).toBe(DEFAULT_API);
 			expect(result.prefix).toBe(DEFAULT_PREFIX);
+			expect(result.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW);
+			expect(result.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+		});
+
+		it("should use backend.contextWindow and maxTokens when provided", () => {
+			const result = resolveBackend(
+				{ baseUrl: "http://custom:8080/v1", contextWindow: 131_072, maxTokens: 65_536 },
+				0,
+				{},
+				true,
+			);
+			expect(result.contextWindow).toBe(131_072);
+			expect(result.maxTokens).toBe(65_536);
+		});
+
+		it("should use fallback contextWindow and maxTokens when backend has none", () => {
+			const result = resolveBackend(
+				{ baseUrl: "http://custom:8080/v1" },
+				0,
+				{ contextWindow: 131_072, maxTokens: 32_768 },
+				true,
+			);
+			expect(result.contextWindow).toBe(131_072);
+			expect(result.maxTokens).toBe(32_768);
 		});
 
 		it("should resolve apiKey from env var", () => {

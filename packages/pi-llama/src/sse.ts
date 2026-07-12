@@ -26,11 +26,18 @@ export class SseManager {
 	private providerId: string;
 	private baseUrl: string;
 	private currentModels: DiscoveredModel[];
+	// Change 4: callback to clear the failedProps cache entry when a model loads
+	private onModelLoadedCallback: ((providerId: string, modelId: string) => void) | null = null;
 
 	constructor(providerId: string, baseUrl: string, currentModels: DiscoveredModel[]) {
 		this.providerId = providerId;
 		this.baseUrl = baseUrl;
 		this.currentModels = currentModels;
+	}
+
+	/** Register a callback invoked when SSE reports a model as loaded. */
+	setOnLoadedCallback(callback: (providerId: string, modelId: string) => void): void {
+		this.onModelLoadedCallback = callback;
 	}
 
 	/** Close all SSE connections for this manager (called on shutdown). */
@@ -144,6 +151,8 @@ export class SseManager {
 		if (eventType === "model_status" || eventType === "status_change" || eventType === "status_update") {
 			if (data.status === "loaded") {
 				onLoaded(eventModel);
+				// Change 4: signal index.ts to clear the stale failedProps entry
+				this.onModelLoadedCallback?.(this.providerId, eventModel);
 			}
 		}
 

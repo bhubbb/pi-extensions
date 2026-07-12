@@ -121,6 +121,8 @@ interface LlamaBackendConfig {
   api?: string;          // API type, default: "openai-completions"
   authHeader?: boolean;  // Send Authorization: Bearer header
   prefix?: string;       // Prefix to strip from model names
+  contextWindow?: number; // Default context window for offline fallback (default: 8192)
+  maxTokens?: number;     // Default max output tokens for offline fallback (default: 16384)
 }
 
 interface PersistedConfig {
@@ -142,6 +144,10 @@ Each backend is discovered independently:
 - `/v1/models` lists available models
 - `/props` discovers context window and thinking support per model
 - `/models/sse` streams model loading progress
+
+### Thinking models
+
+Models with `enable_thinking` in their chat template are auto-detected and registered with full thinking level support (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`). Use `/settings` to pick your thinking level. The `qwen-chat-template` compat mode translates pi's thinking levels into `chat_template_kwargs.enable_thinking` for llama.cpp.
 
 ## Uninstall
 

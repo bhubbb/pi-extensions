@@ -14,6 +14,10 @@ export interface LlamaBackendConfig {
 	authHeader?: boolean;
 	/** Prefix to strip from model names during display. */
 	prefix?: string;
+	/** Default context window for offline fallback (when /v1/models meta.n_ctx is missing). Defaults to 8192. */
+	contextWindow?: number;
+	/** Default max output tokens for offline fallback. Defaults to 16384. */
+	maxTokens?: number;
 }
 
 /** Shape of the JSON file persisted to disk (~/.pi/agent/pi-llama.json). */
@@ -32,6 +36,10 @@ export interface ResolvedBackend {
 	api: string;
 	authHeader: boolean;
 	prefix: string;
+	/** Default context window for offline fallback. */
+	contextWindow: number;
+	/** Default max output tokens for offline fallback. */
+	maxTokens: number;
 }
 
 /** Runtime discovery result for a single backend. */
@@ -41,6 +49,75 @@ export interface BackendDiscoveryResult {
 	models: DiscoveredModel[];
 	warnings?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// /props discovery result variants (Change 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Typed result from `fetchModelProps`. Each variant carries a `retryable`
+ * hint so the caller knows whether to retry.
+ */
+export type PropsResult =
+	| PropsOk
+	| PropsNotLoaded
+	| PropsNotFound
+	| PropsEndpointMissing
+	| PropsServerError
+	| PropsError;
+
+export interface PropsOk {
+	variant: "ok";
+	retryable: false;
+	contextWindow: number;
+	maxTokens: number;
+	supportsThinking: boolean;
+}
+
+export interface PropsNotLoaded {
+	variant: "not-loaded";
+	retryable: true;
+	status: number;
+	errorMessage: string;
+}
+
+export interface PropsNotFound {
+	variant: "not-found";
+	retryable: true;
+	status: number;
+	errorMessage: string;
+}
+
+export interface PropsEndpointMissing {
+	variant: "endpoint-missing";
+	retryable: false;
+	status: number;
+}
+
+export interface PropsServerError {
+	variant: "server-error";
+	retryable: true;
+	status: number;
+	autoload: boolean;
+}
+
+export interface PropsError {
+	variant: "error";
+	retryable: boolean; // true for network, false for abort
+	message: string;
+}
+
+/** Negative cache entry for `failedProps` (Change 4). */
+export interface FailedPropsEntry {
+	/** The classification variant that caused the failure. */
+	variant: PropsResult["variant"];
+	/** If true, give up entirely (unrecoverable or budget exhausted). */
+	giveUp: boolean;
+	/** Unix ms timestamp until which re-probing should be suppressed. */
+	cooldownUntil: number;
+}
+
+// ---------------------------------------------------------------------------
 
 /** A discovered model with normalized Pi provider metadata. */
 export interface DiscoveredModel {

@@ -8,6 +8,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "./constants";
 import type { LlamaBackendConfig, PersistedConfig, ResolvedBackend } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,8 @@ export async function loadModelsJsonFallback(): Promise<Partial<LlamaBackendConf
 			apiKey: llamaCpp.apiKey,
 			api: llamaCpp.api,
 			authHeader: llamaCpp.authHeader,
+			contextWindow: llamaCpp.contextWindow,
+			maxTokens: llamaCpp.maxTokens,
 		};
 	} catch {
 		return {};
@@ -99,7 +102,7 @@ export function resolveSingleKey(input?: string): string {
  *                            fallback, or defaults). Results in "llama-cpp" provider ID.
  *                            false when the settings file prescribes multiple backends.
  */
-function resolveBackend(
+export function resolveBackend(
 	backend: LlamaBackendConfig,
 	idx: number,
 	fallback: Partial<LlamaBackendConfig>,
@@ -130,6 +133,8 @@ function resolveBackend(
 		api: backend.api ?? fallback.api ?? DEFAULT_API,
 		authHeader: backend.authHeader ?? fallback.authHeader ?? false,
 		prefix: backend.prefix ?? fallback.prefix ?? DEFAULT_PREFIX,
+		contextWindow: backend.contextWindow ?? fallback.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+		maxTokens: backend.maxTokens ?? fallback.maxTokens ?? DEFAULT_MAX_TOKENS,
 	};
 }
 

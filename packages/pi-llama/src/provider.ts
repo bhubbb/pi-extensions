@@ -57,6 +57,43 @@ export function setLastResult(providerId: string, source: string, modelCount: nu
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the thinkingLevelMap for a thinking-capable model.
+ *
+ * llama.cpp uses enable_thinking in chat_template_kwargs (boolean), so all
+ * non-off levels map to the same "enabled" state. We pass all levels through
+ * so pi can show the full range in /settings and the user picks their
+ * preferred budget via thinkingBudgets. The compat.thinkingFormat="qwen-chat-template"
+ * then converts this to chat_template_kwargs.enable_thinking=true/false.
+ *
+ * @internal exported for testing
+ */
+export function buildThinkingLevelMap(): Record<string, string> {
+	return {
+		minimal: "minimal",
+		low: "low",
+		medium: "medium",
+		high: "high",
+		xhigh: "xhigh",
+	};
+}
+
+/**
+ * Build compat settings for a model, adding thinking format when supported.
+ *
+ * @internal exported for testing
+ */
+export function buildModelCompat(model: DiscoveredModel): Record<string, unknown> {
+	const base = model.compat ?? {};
+	if (model.reasoning) {
+		// qwen-chat-template: tells pi to set chat_template_kwargs.enable_thinking
+		// based on the active thinking level, and to preserve thinking blocks in
+		// the response (matching llama.cpp's enable_thinking behavior).
+		return { ...base, thinkingFormat: "qwen-chat-template" };
+	}
+	return base;
+}
+
+/**
  * Register or update a single backend's provider in pi.
  */
 export function registerBackendProvider(
@@ -82,7 +119,11 @@ export function registerBackendProvider(
 			cost: m.cost,
 			contextWindow: m.contextWindow,
 			maxTokens: m.maxTokens,
-			compat: m.compat,
+			// Include thinkingLevelMap and compat for thinking-capable models so
+			// pi shows thinking levels in /settings and sends enable_thinking
+			// via chat_template_kwargs.
+			...(m.reasoning ? { thinkingLevelMap: buildThinkingLevelMap() } : {}),
+			compat: buildModelCompat(m),
 		})),
 	});
 }
@@ -109,18 +150,4 @@ export function registerAllProviders(
  */
 export function modelSupportsThinking(model: DiscoveredModel): boolean {
 	return model.reasoning;
-}
-
-/**
- * Build the thinkingLevelMap for llama.cpp's chat-template thinking control.
- * llama.cpp uses enable_thinking in chat_template_kwargs (boolean), so we expose
- * Pi's default off/medium toggle only.
- */
-export function getThinkingLevelMap(): Record<string, string | null> {
-	return {
-		minimal: null,
-		low: null,
-		high: null,
-		xhigh: null,
-	};
 }

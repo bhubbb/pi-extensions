@@ -14,9 +14,25 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { resolveConfig } from "./config";
+import {
+	DEFAULT_CONTEXT_WINDOW,
+	DEFAULT_MAX_TOKENS,
+	PROPS_NOT_LOADED_MAX_ATTEMPTS,
+	PROPS_NOT_FOUND_MAX_ATTEMPTS,
+	PROPS_SERVER_ERROR_MAX_ATTEMPTS,
+	PROPS_AUTOLOAD_MAX_ATTEMPTS,
+	PROPS_COOLDOWN_NOT_LOADED_MS,
+	PROPS_COOLDOWN_SERVER_ERROR_MS,
+	PROPS_COOLDOWN_NETWORK_ERROR_MS,
+	PROPS_BACKOFF_NOT_LOADED_BASE_MS,
+	PROPS_BACKOFF_NOT_FOUND_BASE_MS,
+	PROPS_BACKOFF_SERVER_ERROR_BASE_MS,
+	PROPS_BACKOFF_AUTOLOAD_BASE_MS,
+	delayForAttempt,
+} from "./constants";
 import { fetchModelList, fetchModelProps } from "./discovery";
 import {
 	getCurrentConfig,
@@ -27,7 +43,7 @@ import {
 } from "./provider";
 import { ModelLoadTracker, SseManager } from "./sse";
 import { registerSetupCommand, registerStatusCommand, registerVersionCommand } from "./commands";
-import type { DiscoveredModel, ResolvedBackend } from "./types";
+import type { DiscoveredModel, FailedPropsEntry, PropsResult, ResolvedBackend } from "./types";
 
 // ---------------------------------------------------------------------------
 // Settings.json fallback for offline model registration
@@ -48,8 +64,15 @@ function readSettingsEnabledModels(): string[] {
 /**
  * Convert enabledModels entries matching a provider prefix into DiscoveredModel objects.
  * Model format in settings.json: "llama-cpp-1/unsloth/model-name:quant"
+ *
+ * When the server is offline, use the backend's configured contextWindow/maxTokens
+ * (or constants defaults) instead of hard-coded guesses.
  */
-function modelsFromSettings(providerId: string): DiscoveredModel[] {
+function modelsFromSettings(
+	providerId: string,
+	defaultContextWindow: number,
+	defaultMaxTokens: number,
+): DiscoveredModel[] {
 	const enabled = readSettingsEnabledModels();
 	const prefix = `${providerId}/`;
 
@@ -65,10 +88,10 @@ function modelsFromSettings(providerId: string): DiscoveredModel[] {
 			return {
 				id: modelName,
 				name: modelName,
-				reasoning: false,
+				reasoning: false, // discovered later via /props when server is available
 				input: ["text"] as const,
-				contextWindow: 131_072,
-				maxTokens: 16_384,
+				contextWindow: defaultContextWindow,
+				maxTokens: defaultMaxTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			};
 		});
@@ -85,10 +108,14 @@ const sessionState = {
 	loadTracker: new ModelLoadTracker(),
 	// Timeout for clearing footer status
 	statusTimeout: undefined as ReturnType<typeof setTimeout> | undefined,
-	// Cache of per-model props discovery
+	// Cache of per-model props discovery (positive results)
 	discoveredProps: new Map<string, { contextWindow: number; maxTokens: number; supportsThinking: boolean }>(),
 	// Track which models are currently being discovered (prevent duplicate requests)
 	pendingDiscovery: new Set<string>(),
+	// Negative-result cache keyed by "providerId:modelId" (Change 4)
+	failedProps: new Map<string, FailedPropsEntry>(),
+	// Callback to clear failedProps when SSE reports a model as loaded
+	onPropsCacheCleared: (() => {}) as (key: string) => void,
 };
 
 function clearFooterStatusTimeout(): void {
@@ -115,7 +142,11 @@ async function discoverBackend(
 
 		if (models.length === 0) {
 			// Server returned empty — try offline fallback from enabledModels
-			const fallbackModels = modelsFromSettings(backend.providerId);
+			const fallbackModels = modelsFromSettings(
+				backend.providerId,
+				backend.contextWindow,
+				backend.maxTokens,
+			);
 			if (fallbackModels.length > 0) {
 				providerModels[backend.providerId] = fallbackModels;
 				console.log(`[llama-cpp] empty server response: registered ${fallbackModels.length} model(s) from enabledModels`);
@@ -143,7 +174,11 @@ async function discoverBackend(
 		const msg = (err as Error).message;
 		console.warn(`[llama-cpp] failed to reach ${backend.baseUrl}/models: ${msg}`);
 		// Fallback: register models from settings.json enabledModels list
-		const fallbackModels = modelsFromSettings(backend.providerId);
+		const fallbackModels = modelsFromSettings(
+			backend.providerId,
+			backend.contextWindow,
+			backend.maxTokens,
+		);
 		if (fallbackModels.length > 0) {
 			providerModels[backend.providerId] = fallbackModels;
 			console.log(`[llama-cpp] offline fallback: registered ${fallbackModels.length} model(s) from enabledModels`);
@@ -154,14 +189,117 @@ async function discoverBackend(
 }
 
 /**
+ * Apply discovered props metadata to the registered model and re-register.
+ */
+function applyPropsMetadata(
+	key: string,
+	props: { contextWindow: number; maxTokens: number; supportsThinking: boolean },
+	config: ResolvedBackend[],
+	pi: ExtensionAPI,
+): void {
+	sessionState.discoveredProps.set(key, props);
+
+	// Update model metadata in-place
+	const providerId = key.split(":")[0];
+	const modelId = key.split(":").slice(1).join(":");
+	const models = getModels(providerId);
+	const model = models.find((m) => m.id === modelId);
+	if (model) {
+		model.contextWindow = props.contextWindow;
+		model.maxTokens = props.maxTokens;
+		if (props.supportsThinking) {
+			model.reasoning = true;
+		}
+	}
+
+	// Re-register the provider with updated model
+	const providerModels: Record<string, DiscoveredModel[]> = {};
+	config.forEach((b) => {
+		providerModels[b.providerId] = getModels(b.providerId);
+	});
+	registerAllProviders(pi, config, providerModels);
+}
+
+/**
+ * Get the max retry attempts for a given variant and autoload flag.
+ */
+function getMaxAttempts(variant: PropsResult["variant"], autoload: boolean): number {
+	switch (variant) {
+		case "not-loaded":
+			return autoload ? PROPS_AUTOLOAD_MAX_ATTEMPTS : PROPS_NOT_LOADED_MAX_ATTEMPTS;
+		case "not-found":
+			return PROPS_NOT_FOUND_MAX_ATTEMPTS;
+		case "server-error":
+			return PROPS_SERVER_ERROR_MAX_ATTEMPTS;
+		case "error":
+			return PROPS_SERVER_ERROR_MAX_ATTEMPTS;
+		default:
+			return 1; // ok, endpoint-missing: no retry
+	}
+}
+
+/**
+ * Get the backoff base delay for a given variant and autoload flag.
+ */
+function getBackoffBase(variant: PropsResult["variant"], autoload: boolean): number {
+	switch (variant) {
+		case "not-loaded":
+			return autoload ? PROPS_BACKOFF_AUTOLOAD_BASE_MS : PROPS_BACKOFF_NOT_LOADED_BASE_MS;
+		case "not-found":
+			return PROPS_BACKOFF_NOT_FOUND_BASE_MS;
+		case "server-error":
+			return PROPS_BACKOFF_SERVER_ERROR_BASE_MS;
+		case "error":
+			return PROPS_BACKOFF_SERVER_ERROR_BASE_MS;
+		default:
+			return 0;
+	}
+}
+
+/**
+ * Get the cooldown duration (ms) for a given variant.
+ * Doubled on the before_provider_request probe path (autoload=false).
+ */
+function getCooldown(variant: PropsResult["variant"], isProbePath: boolean): number {
+	const base =
+		variant === "not-loaded"
+			? PROPS_COOLDOWN_NOT_LOADED_MS
+			: variant === "server-error"
+			? PROPS_COOLDOWN_SERVER_ERROR_MS
+			: PROPS_COOLDOWN_NETWORK_ERROR_MS;
+	return isProbePath ? base * 2 : base;
+}
+
+/**
+ * Clear the failedProps cache entry for a model.
+ */
+function clearFailedPropsEntry(key: string): void {
+	sessionState.failedProps.delete(key);
+}
+
+/**
+ * Clear all failedProps entries for a specific backend (all models).
+ */
+function clearFailedPropsForBackend(providerId: string): void {
+	for (const [k] of sessionState.failedProps) {
+		if (k.startsWith(providerId + ":")) {
+			sessionState.failedProps.delete(k);
+		}
+	}
+}
+
+/**
  * Discover props metadata for a specific model across all backends.
+ * Owns the retry loop with bounded backoff (Change 3) and the negative
+ * cache with cooldown (Change 4).
  */
 async function discoverModelProps(
 	pi: ExtensionAPI,
 	providerId: string,
 	modelId: string,
-	ctx: Parameters<ExtensionAPI["on"]>[1],
+	ctx: ExtensionContext,
 	autoload = true,
+	options?: { clearCacheOnSelect?: boolean },
 ): Promise<void> {
 	const config = getCurrentConfig();
 	if (!config) return;
@@ -174,52 +312,142 @@ async function discoverModelProps(
 	if (sessionState.pendingDiscovery.has(key)) return;
 	sessionState.pendingDiscovery.add(key);
 
+	const isProbePath = !autoload; // before_provider_request uses autoload=false
+
+	// Change 7: on model_select, clear the failedProps entry so the user's
+	// explicit choice gets a fresh chance with autoload=true.
+	if (options?.clearCacheOnSelect) {
+		clearFailedPropsEntry(key);
+	}
+
 	const isLoaded = sessionState.loadTracker.isModelLoaded(providerId, modelId);
 
 	// If already discovered and still loaded, skip
 	const existing = sessionState.discoveredProps.get(key);
 	if (existing && isLoaded) {
 		// Apply cached metadata to the model
-		const models = getModels(providerId);
-		const model = models.find((m) => m.id === modelId);
-		if (model) {
-			model.contextWindow = existing.contextWindow;
-			model.maxTokens = existing.maxTokens;
-			if (existing.supportsThinking) {
-				model.reasoning = true;
-			}
-		}
+		applyPropsMetadata(key, existing, config, pi);
 		sessionState.pendingDiscovery.delete(key);
 		return;
 	}
 
+	// Change 4: check the negative cache before probing
+	const failedEntry = sessionState.failedProps.get(key);
+	if (failedEntry) {
+		if (failedEntry.giveUp) {
+			// Unrecoverable or budget exhausted — skip entirely
+			sessionState.pendingDiscovery.delete(key);
+			return;
+		}
+		if (failedEntry.cooldownUntil > Date.now()) {
+			// Inside cooldown window — skip until it expires
+			sessionState.pendingDiscovery.delete(key);
+			return;
+		}
+		// Cooldown expired — allow re-probe below
+	}
+
+	// Change 6: id round-trip debug check (log only)
+	const encoded = encodeURIComponent(modelId);
+	if (encoded.includes("%25")) {
+		console.debug(`[llama-cpp] /props id round-trip warning: double-encoded % in '${modelId}' → '${encoded}'`);
+	}
+	const decoded = decodeURIComponent(encoded);
+	if (decoded !== modelId) {
+		console.debug(`[llama-cpp] /props id round-trip warning: '${modelId}' decoded to '${decoded}'`);
+	}
+
+	// Change 3: retry loop with bounded backoff
+	let lastResult: PropsResult | undefined;
+	const abortController = new AbortController();
+
 	try {
-		const props = await fetchModelProps(backend.baseUrl, modelId, autoload);
+		// Determine initial variant for attempt budget from first fetch
+		let currentVariant: PropsResult["variant"] = "error";
 
-		if (props) {
-			sessionState.discoveredProps.set(key, props);
+		for (let attempt = 0; ; attempt++) {
+			// Determine max attempts based on the current variant
+			const maxAttempts = getMaxAttempts(currentVariant, autoload);
+			if (attempt >= maxAttempts) {
+				break; // Budget exhausted
+			}
 
-			// Update model metadata
-			const models = getModels(providerId);
-			const model = models.find((m) => m.id === modelId);
-			if (model) {
-				model.contextWindow = props.contextWindow;
-				model.maxTokens = props.maxTokens;
-				if (props.supportsThinking) {
-					model.reasoning = true;
+			// Check abort signal (session replacement, shutdown)
+			if (abortController.signal.aborted) {
+				return;
+			}
+
+			// Backoff between attempts (not before the first)
+			if (attempt > 0) {
+				const baseDelay = getBackoffBase(currentVariant, autoload);
+				const delay = delayForAttempt(attempt - 1, baseDelay);
+				await new Promise((resolve) => setTimeout(resolve, delay));
+
+				// Re-check abort after delay
+				if (abortController.signal.aborted) {
+					return;
 				}
 			}
 
-			// Re-register the provider with updated model
-			const providerModels: Record<string, DiscoveredModel[]> = {};
-			config.forEach((b) => {
-				providerModels[b.providerId] = getModels(b.providerId);
-			});
-			registerAllProviders(pi, config, providerModels);
+			lastResult = await fetchModelProps(backend.baseUrl, modelId, autoload);
+
+			if (lastResult.variant === "ok") {
+				// Success — clear any prior failedProps entry and apply metadata
+				clearFailedPropsEntry(key);
+				applyPropsMetadata(key, lastResult, config, pi);
+				sessionState.pendingDiscovery.delete(key);
+				return;
+			}
+
+			// Non-retryable — stop immediately
+			if (!lastResult.retryable) {
+				break;
+			}
+
+			// Update variant for next iteration's attempt budget
+			currentVariant = lastResult.variant;
 		}
-	} finally {
-		sessionState.pendingDiscovery.delete(key);
+	} catch (err) {
+		const msg = (err as Error).message;
+		if (!msg.includes("stale after session replacement")) {
+			console.warn(`[llama-cpp] /props retry loop error for ${modelId}: ${msg}`);
+		}
 	}
+
+	// Change 4: write the negative cache entry on exhaustion
+	if (lastResult) {
+		const variant = lastResult.variant;
+		const cooldown = getCooldown(variant, isProbePath);
+		const giveUp = variant === "endpoint-missing" || variant === "not-found";
+
+		sessionState.failedProps.set(key, {
+			variant,
+			giveUp,
+			cooldownUntil: Date.now() + cooldown,
+		});
+
+		// Change 5: emit user notification after retries settle
+		if (variant === "not-found" && giveUp) {
+			ctx.ui.notify(
+				`llama.cpp: model ${modelId} not found on ${providerId} after retries; metadata discovery skipped. Model still usable with default context window. Check /llama-status.`,
+				"warning",
+			);
+		} else if (variant === "endpoint-missing") {
+			ctx.ui.notify(
+				`llama.cpp /props unavailable on ${providerId}; using default context window.`,
+				"info",
+			);
+		} else if (variant === "server-error" && giveUp === false) {
+			ctx.ui.notify(
+				`llama.cpp /props for ${modelId} failed (${lastResult.status}) after retries; using default metadata. Will retry after cooldown.`,
+				"warning",
+			);
+		}
+		// not-loaded → never notify (benign, model is fine)
+		// error (network) → console.warn only, no spam
+	}
+
+	sessionState.pendingDiscovery.delete(key);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +470,11 @@ export default async function (pi: ExtensionAPI) {
 	// ---------------------------------------------------------------------------
 	const fallbackProviderModels: Record<string, DiscoveredModel[]> = {};
 	for (const backend of config) {
-		const fallback = modelsFromSettings(backend.providerId);
+		const fallback = modelsFromSettings(
+			backend.providerId,
+			backend.contextWindow,
+			backend.maxTokens,
+		);
 		if (fallback.length > 0) {
 			fallbackProviderModels[backend.providerId] = fallback;
 		}
@@ -293,10 +525,13 @@ export default async function (pi: ExtensionAPI) {
 					// Initialize SSE managers for backends that returned models
 				config.forEach((backend) => {
 					if (providerModels[backend.providerId] && providerModels[backend.providerId].length > 0) {
-						sessionState.sseManagers.set(
-							backend.providerId,
-							new SseManager(backend.providerId, backend.baseUrl, providerModels[backend.providerId]),
-						);
+						const sse = new SseManager(backend.providerId, backend.baseUrl, providerModels[backend.providerId]);
+						// Change 4: when SSE reports a model as loaded, clear the stale
+						// failedProps entry so the next probe is allowed.
+						sse.setOnLoadedCallback((_providerId, _modelId) => {
+							clearFailedPropsEntry(`${_providerId}:${_modelId}`);
+						});
+						sessionState.sseManagers.set(backend.providerId, sse);
 					}
 				});
 			} else {
@@ -343,7 +578,8 @@ export default async function (pi: ExtensionAPI) {
 		// the first request after selection goes out with pre-discovery defaults
 		// (8192 ctx / 16384 out) and only gets corrected on request #2. autoload=true
 		// here is intentional — selecting a model should load it.
-		await discoverModelProps(pi, providerId, event.model.id, ctx, true);
+		// Change 7: clear failedProps so the user's explicit choice gets a fresh attempt.
+		await discoverModelProps(pi, providerId, event.model.id, ctx, true, { clearCacheOnSelect: true });
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
@@ -376,11 +612,16 @@ export default async function (pi: ExtensionAPI) {
 		sessionState.sseManagers.clear();
 		sessionState.discoveredProps.clear();
 		sessionState.pendingDiscovery.clear();
+		sessionState.failedProps.clear();
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		const config = getCurrentConfig();
 		if (!config) return;
+
+		// Change 4: clear failedProps on session_start — server may have
+		// restarted, models reloaded, or URL may point at a fresh server.
+		sessionState.failedProps.clear();
 
 		// Re-register providers with the freshest model data we have. By
 		// session_start the runner is active, so pi.registerProvider() works.
@@ -394,7 +635,11 @@ export default async function (pi: ExtensionAPI) {
 				allProviderModels[backend.providerId] = models;
 				if (models.some((m) => m.status?.value === "loaded" || (m as any)._live)) hasLive = true;
 			} else {
-				const fallback = modelsFromSettings(backend.providerId);
+				const fallback = modelsFromSettings(
+					backend.providerId,
+					backend.contextWindow,
+					backend.maxTokens,
+				);
 				if (fallback.length > 0) allProviderModels[backend.providerId] = fallback;
 			}
 		}

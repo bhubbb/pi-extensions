@@ -4,8 +4,12 @@
 import { Type } from "typebox";
 import { Compile } from "typebox/compile";
 
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, PROPS_TIMEOUT_MS } from "./constants";
-import type { DiscoveredModel, ResolvedBackend } from "./types";
+import {
+	DEFAULT_CONTEXT_WINDOW,
+	DEFAULT_MAX_TOKENS,
+	PROPS_ATTEMPT_TIMEOUT_MS,
+} from "./constants";
+import type { DiscoveredModel, PropsResult, ResolvedBackend } from "./types";
 
 // ---------------------------------------------------------------------------
 // SSE event types for model loading progress
@@ -65,9 +69,13 @@ const ModelsResponseSchema = Type.Object({
 						input_modalities: Type.Optional(Type.Array(Type.String())),
 					}),
 				),
+				// meta comes from GGUF model metadata (model_meta() in llama.cpp server).
+				// Contains n_ctx_train (trained context), NOT n_ctx (runtime context).
+				// The authoritative runtime n_ctx is only available from /props.
+				// We use n_ctx_train as the best pre-discovery estimate.
 				meta: Type.Optional(
 					Type.Object({
-						n_ctx: Type.Optional(Type.Number()),
+						n_ctx_train: Type.Optional(Type.Number()),
 						n_params: Type.Optional(Type.Number()),
 					}),
 				),
@@ -122,7 +130,8 @@ export async function fetchModelList(
 		aliases?: string[];
 		status?: { value?: string };
 		architecture?: { input_modalities?: string[] };
-		meta?: { n_ctx?: number; n_params?: number };
+		// meta from GGUF: n_ctx_train (trained context), not runtime n_ctx
+		meta?: { n_ctx_train?: number; n_params?: number };
 	};
 	const data = (payload as { data?: RawModel[] }).data ?? [];
 	if (data.length === 0) {
@@ -140,7 +149,10 @@ export async function fetchModelList(
 		if (model.status?.value === "loaded") {
 			suffixes.push("(loaded)");
 		}
-		const contextWindow = model.meta?.n_ctx ?? DEFAULT_CONTEXT_WINDOW;
+		// meta.n_ctx_train is the model's trained context (from GGUF metadata), not
+		// the configured runtime n_ctx. The authoritative value comes from /props,
+		// but n_ctx_train is a much better pre-discovery estimate than 8192.
+		const contextWindow = model.meta?.n_ctx_train ?? DEFAULT_CONTEXT_WINDOW;
 		const displayName = model.aliases?.[0] || model.id;
 		const name = prefix
 			? displayName.replace(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "")
@@ -151,7 +163,7 @@ export async function fetchModelList(
 			reasoning: false, // discovered later via /props
 			input,
 			contextWindow,
-			maxTokens: Math.min(DEFAULT_MAX_TOKENS, contextWindow),
+			maxTokens: contextWindow > DEFAULT_MAX_TOKENS ? DEFAULT_MAX_TOKENS : contextWindow,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			compat: {},
 			status: model.status,
@@ -160,28 +172,102 @@ export async function fetchModelList(
 }
 
 /**
+ * Parse a llama.cpp JSON error envelope. Returns `{ message, type }` or null.
+ * Guarded by try/catch — the body may be empty or non-JSON on proxies.
+ */
+function parseLlamaCppError(body: unknown): { message: string; type: string } | null {
+	if (typeof body !== "object" || body === null) return null;
+	const obj = body as Record<string, unknown>;
+	const error = obj.error;
+	if (typeof error !== "object" || error === null) return null;
+	const errObj = error as Record<string, unknown>;
+	const message = typeof errObj.message === "string" ? errObj.message : null;
+	const type = typeof errObj.type === "string" ? errObj.type : null;
+	if (!message) return null;
+	return { message, type: type ?? "" };
+}
+
+/**
+ * Classify a non-OK /props response into a typed PropsResult variant.
+ * Reads the response body first to extract the error message, then
+ * classifies based on status + message content.
+ */
+async function classifyPropsError(
+	response: Response,
+	autoload: boolean,
+): Promise<PropsResult> {
+	// Try to parse the error body (guarded — may be empty/non-JSON)
+	let parsedError: { message: string; type: string } | null = null;
+	try {
+		const body = await response.json();
+		parsedError = parseLlamaCppError(body);
+	} catch {
+		// Body was not JSON or empty (proxy, old server, etc.)
+	}
+
+	const status = response.status;
+
+	// 404 with no parseable llama.cpp error → endpoint genuinely missing
+	if (status === 404 && !parsedError) {
+		return { variant: "endpoint-missing", retryable: false, status };
+	}
+
+	// Classify by error message (llama.cpp standard envelope)
+	if (parsedError) {
+		const msg = parsedError.message.toLowerCase();
+
+		// "model is not loaded" — benign probe against a not-yet-loaded model
+		if (msg.includes("not loaded") || msg.includes("is not loaded")) {
+			return { variant: "not-loaded", retryable: true, status, errorMessage: parsedError.message };
+		}
+
+		// "model '<id>' not found" — the id isn't in the server's map
+		if (msg.includes("not found") || msg.includes("is not found")) {
+			return { variant: "not-found", retryable: true, status, errorMessage: parsedError.message };
+		}
+	}
+
+	// 5xx errors are transient server errors
+	if (status >= 500 && status < 600) {
+		return { variant: "server-error", retryable: true, status, autoload };
+	}
+
+	// Fallback: bare 400 or other unexpected status
+	// Treated as transient (retryable) since /props *should* exist
+	return {
+		variant: "error",
+		retryable: true,
+		message: parsedError?.message ?? `unexpected status ${status}`,
+	};
+}
+
+/**
  * Fetch /props for a model to discover n_ctx, chat_template (thinking support), etc.
- * Returns the updated model with discovered metadata, or undefined on failure.
+ * Returns a typed PropsResult so the caller can react per-case.
+ * Uses PROPS_ATTEMPT_TIMEOUT_MS per call (not the legacy PROPS_TIMEOUT_MS).
  */
 export async function fetchModelProps(
 	baseUrl: string,
 	modelId: string,
 	autoload = true,
-	timeoutMs = PROPS_TIMEOUT_MS,
-): Promise<{ contextWindow: number; maxTokens: number; supportsThinking: boolean } | undefined> {
-
+	timeoutMs = PROPS_ATTEMPT_TIMEOUT_MS,
+): Promise<PropsResult> {
 	const propsUrl = `${baseUrl.replace(/\/v1$/, "")}/props?model=${encodeURIComponent(modelId)}&autoload=${autoload}`;
 	const controller = new AbortController();
 	setTimeout(() => controller.abort(), timeoutMs);
 
 	try {
 		const response = await fetch(propsUrl, { signal: controller.signal });
+
 		if (!response.ok) {
-			// 500 during autoload is expected when server cancels a load to start another
+			// 500 during autoload is expected (server cancels a load to start another).
+			// Silently classify — the caller's retry loop will handle it.
+			const result = await classifyPropsError(response, autoload);
 			if (!(autoload && response.status === 500)) {
-				console.warn(`[llama-cpp] /props for ${modelId} returned ${response.status}`);
+				// Log non-silenced errors at debug level (caller decides user-facing notifications)
+				console.debug(`[llama-cpp] /props for ${modelId} returned ${response.status} (${result.variant})`);
 			}
-			return undefined;
+			return result;
 		}
 
 		const dataRaw = await response.json();
@@ -190,7 +276,11 @@ export async function fetchModelProps(
 				.map((e) => `${"path" in e ? e.path : ""} ${e.message}`)
 				.join("; ");
 			console.warn(`[llama-cpp] invalid /props response for ${modelId}: ${errors}`);
-			return undefined;
+			return {
+				variant: "error",
+				retryable: false,
+				message: `invalid response: ${errors}`,
+			};
 		}
 		const data = dataRaw as {
 			default_generation_settings?: { n_ctx?: number };
@@ -205,6 +295,8 @@ export async function fetchModelProps(
 		const supportsThinking = typeof chatTemplate === "string" && chatTemplate.includes("enable_thinking");
 
 		return {
+			variant: "ok" as const,
+			retryable: false as const,
 			contextWindow: typeof nCtx === "number" && nCtx > 0 ? nCtx : DEFAULT_CONTEXT_WINDOW,
 			// No output cap once we know the real n_ctx: llama.cpp has no real
 			// output-token limit, so let the model use its full context budget for
@@ -215,10 +307,19 @@ export async function fetchModelProps(
 		};
 	} catch (err) {
 		const msg = (err as Error).message;
-		if ((err as Error).name !== "AbortError" && !msg.includes("stale after session replacement")) {
+		const isAbort = (err as Error).name === "AbortError";
+		const isStale = msg.includes("stale after session replacement");
+
+		if (!isAbort && !isStale) {
 			console.warn(`[llama-cpp] /props for ${modelId} failed: ${msg}`);
 		}
-		return undefined;
+
+		// Network errors are retryable; abort/stale are not
+		return {
+			variant: "error" as const,
+			retryable: !isAbort && !isStale,
+			message: msg,
+		};
 	}
 }
 
