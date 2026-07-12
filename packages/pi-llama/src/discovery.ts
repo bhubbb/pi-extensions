@@ -263,9 +263,15 @@ export async function fetchModelProps(
 			// 500 during autoload is expected (server cancels a load to start another).
 			// Silently classify — the caller's retry loop will handle it.
 			const result = await classifyPropsError(response, autoload);
-			if (!(autoload && response.status === 500)) {
-				// Log non-silenced errors at debug level (caller decides user-facing notifications)
-				console.debug(`[llama-cpp] /props for ${modelId} returned ${response.status} (${result.variant})`);
+			// Suppress logging for not-loaded (benign — caller skips unloaded models
+			// when autoload=false) and 500-during-autoload (expected race). Log
+			// everything else at debug level.
+			const suppressLog =
+				result.variant === "not-loaded" || (autoload && response.status === 500);
+			if (!suppressLog) {
+				console.debug(
+					`[llama-cpp] /props for ${modelId} returned ${response.status} (${result.variant})`,
+				);
 			}
 			return result;
 		}

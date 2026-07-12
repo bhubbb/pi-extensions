@@ -344,6 +344,15 @@ async function discoverModelProps(
 		return;
 	}
 
+	// If the model isn't loaded on the server and we're not forcing a load,
+	// skip the probe entirely. /props would return 400 not-loaded and just
+	// spam the log. The model will be discovered on next model_select
+	// (autoload=true) or when the SSE manager reports it as loaded.
+	if (!autoload && !isLoaded) {
+		sessionState.pendingDiscovery.delete(key);
+		return;
+	}
+
 	// Change 4: check the negative cache before probing
 	const failedEntry = sessionState.failedProps.get(key);
 	if (failedEntry) {
