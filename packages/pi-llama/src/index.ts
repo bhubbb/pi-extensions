@@ -490,6 +490,60 @@ function seedDiscoveredProps(
 }
 
 /**
+ * Apply cached props to currently-registered models. Mutates the model
+ * objects in place (so reasoning/contextWindow/maxTokens reflect the cache)
+ * and re-registers providers so thinking levels and compat are wired up.
+ *
+ * Runs after the pre-bind queue registration so the model objects exist.
+ */
+function applySeededPropsToModels(
+	pi: ExtensionAPI,
+	config: ResolvedBackend[],
+): boolean {
+	const updatedProviderModels: Record<string, DiscoveredModel[]> = {};
+	let anyUpdated = false;
+
+	for (const backend of config) {
+		const models = getModels(backend.providerId);
+		if (!models || models.length === 0) continue;
+
+		let backendChanged = false;
+		for (const model of models) {
+			const inMemoryKey = `${backend.providerId}:${model.id}`;
+			const props = sessionState.discoveredProps.get(inMemoryKey);
+			if (!props) continue;
+			if (model.contextWindow !== props.contextWindow) {
+				model.contextWindow = props.contextWindow;
+				backendChanged = true;
+			}
+			if (model.maxTokens !== props.maxTokens) {
+				model.maxTokens = props.maxTokens;
+				backendChanged = true;
+			}
+			if (props.supportsThinking && !model.reasoning) {
+				model.reasoning = true;
+				backendChanged = true;
+			}
+		}
+
+		if (backendChanged) {
+			updatedProviderModels[backend.providerId] = models;
+			anyUpdated = true;
+		}
+	}
+
+	if (!anyUpdated) return false;
+
+	try {
+		registerAllProviders(pi, config, updatedProviderModels);
+		return true;
+	} catch {
+		// Runner may still be binding; the next session_start will re-register.
+		return false;
+	}
+}
+
+/**
  * Parse a persisted cache key back into { baseUrl, modelId }.
  * Mirrors parseServerCacheKey from config.ts.
  */
@@ -590,6 +644,11 @@ export default async function (pi: ExtensionAPI) {
 			// Pre-bind queueing should not throw, but guard anyway.
 		}
 	}
+
+	// Apply cached props (context/maxTokens/thinking) to the just-registered
+	// models so thinking levels show up in /settings immediately after /reload,
+	// without waiting for live re-discovery. Skip if no cache was seeded.
+	applySeededPropsToModels(pi, config);
 
 	// ---------------------------------------------------------------------------
 	// Register commands
