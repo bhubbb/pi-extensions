@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "./constants";
 import type { LlamaBackendConfig, PersistedConfig, PersistedDiscoveredProps, ResolvedBackend } from "./types";
@@ -90,6 +90,7 @@ export function pruneStaleEntries(
 // ---------------------------------------------------------------------------
 
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-llama.json");
+export const MODELS_JSON_PATH = join(homedir(), ".pi", "agent", "models.json");
 export const CONFIG_VERSION = 1;
 
 export const DEFAULT_BASE_URL = "http://localhost:8080/v1";
@@ -102,9 +103,9 @@ export const DEFAULT_PREFIX = "";
 // ---------------------------------------------------------------------------
 
 /** Load the persisted JSON config, returning empty object on any error. */
-export async function loadPersistedConfig(): Promise<PersistedConfig> {
+export async function loadPersistedConfig(path: string = CONFIG_PATH): Promise<PersistedConfig> {
 	try {
-		const raw = await readFile(CONFIG_PATH, "utf-8");
+		const raw = await readFile(path, "utf-8");
 		return JSON.parse(raw) as PersistedConfig;
 	} catch {
 		return {};
@@ -112,11 +113,14 @@ export async function loadPersistedConfig(): Promise<PersistedConfig> {
 }
 
 /** Atomically write the persisted config file. */
-export async function savePersistedConfig(config: PersistedConfig): Promise<void> {
-	await mkdir(dirname(CONFIG_PATH), { recursive: true });
-	const tmpFile = `${CONFIG_PATH}.tmp`;
+export async function savePersistedConfig(
+	config: PersistedConfig,
+	path: string = CONFIG_PATH,
+): Promise<void> {
+	await mkdir(dirname(path), { recursive: true });
+	const tmpFile = `${path}.tmp`;
 	await writeFile(tmpFile, JSON.stringify({ ...config, version: CONFIG_VERSION }, null, 2));
-	await rename(tmpFile, CONFIG_PATH);
+	await rename(tmpFile, path);
 }
 
 // ---------------------------------------------------------------------------
@@ -127,9 +131,10 @@ export async function savePersistedConfig(config: PersistedConfig): Promise<void
  * Read legacy models.json as a fallback for a single llama-cpp backend.
  * Returns a partial backend config if a `llama-cpp` provider is found.
  */
-export async function loadModelsJsonFallback(): Promise<Partial<LlamaBackendConfig>> {
+export async function loadModelsJsonFallback(
+	path: string = MODELS_JSON_PATH,
+): Promise<Partial<LlamaBackendConfig>> {
 	try {
-		const path = resolve(homedir(), ".pi", "agent", "models.json");
 		if (!existsSync(path)) return {};
 		const raw = await readFile(path, "utf-8");
 		const parsed = JSON.parse(raw);
@@ -224,9 +229,12 @@ export function resolveBackend(
  * Single-backend mode: provider ID is always "llama-cpp" (backward compat).
  * Multi-backend mode (settings file): provider IDs are "llama-cpp-0", etc.
  */
-export async function resolveConfig(): Promise<ResolvedBackend[]> {
-	const persisted = await loadPersistedConfig();
-	const fallback = await loadModelsJsonFallback();
+export async function resolveConfig(
+	configPath: string = CONFIG_PATH,
+	modelsJsonPath: string = MODELS_JSON_PATH,
+): Promise<ResolvedBackend[]> {
+	const persisted = await loadPersistedConfig(configPath);
+	const fallback = await loadModelsJsonFallback(modelsJsonPath);
 
 	// Case 1: Legacy env var — single backend, backward compat
 	if (process.env.LLAMA_BASE_URL) {
@@ -247,9 +255,11 @@ export async function resolveConfig(): Promise<ResolvedBackend[]> {
 		);
 	}
 
-	// Case 3: Fall back to models.json llama-cpp entry — single backend
+	// Case 3: Fall back to models.json llama-cpp entry — single backend.
+	// Pass an empty backend so resolveBackend falls through to the fallback
+	// values rather than the DEFAULT_BASE_URL.
 	if (fallback.baseUrl || fallback.apiKey) {
-		return [resolveBackend({ baseUrl: DEFAULT_BASE_URL }, 0, fallback, true)];
+		return [resolveBackend({} as LlamaBackendConfig, 0, fallback, true)];
 	}
 
 	// Case 4: Fall back to defaults — single backend
