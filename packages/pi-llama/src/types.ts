@@ -20,12 +20,25 @@ export interface LlamaBackendConfig {
 	maxTokens?: number;
 }
 
+/** One cached props entry persisted to disk. */
+export interface PersistedDiscoveredProps {
+	/** Cache key (normalizedBaseUrl:modelId). */
+	key: string;
+	contextWindow: number;
+	maxTokens: number;
+	supportsThinking: boolean;
+	/** Unix ms timestamp of when this was discovered. */
+	discoveredAt: number;
+}
+
 /** Shape of the JSON file persisted to disk (~/.pi/agent/pi-llama.json). */
 export interface PersistedConfig {
 	/** Config version for future migration. */
 	version?: number;
 	/** List of llama.cpp backends to discover and register. */
 	backends?: LlamaBackendConfig[];
+	/** Map from server-scoped cache key → discovered props. Additive; old files lack it. */
+	discoveredProps?: Record<string, PersistedDiscoveredProps>;
 }
 
 /** Resolved backend config with defaults filled in. */

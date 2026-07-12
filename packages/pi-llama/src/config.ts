@@ -9,7 +9,81 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "./constants";
-import type { LlamaBackendConfig, PersistedConfig, ResolvedBackend } from "./types";
+import type { LlamaBackendConfig, PersistedConfig, PersistedDiscoveredProps, ResolvedBackend } from "./types";
+
+// ---------------------------------------------------------------------------
+// Cache key helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a baseUrl so equivalent URLs produce the same cache key.
+ * Strips trailing slashes and the `/v1` suffix.
+ */
+export function normalizeBaseUrl(baseUrl: string): string {
+	return stripTrailingSlash(baseUrl.replace(/\/v1$/, ""));
+}
+
+/**
+ * Build a server-scoped cache key: `${normalizedBaseUrl}:${modelId}`.
+ * Uses `baseUrl` instead of `providerId` so the key is stable across
+ * single-backend / multi-backend mode switches.
+ */
+export function serverCacheKey(baseUrl: string, modelId: string): string {
+	return `${normalizeBaseUrl(baseUrl)}:${modelId}`;
+}
+
+/**
+ * Split a server-scoped cache key back into baseUrl and modelId.
+ * Splits on the first `:` after the normalized URL prefix, so model ids
+ * that contain `:` (e.g. quant suffixes like `unsloth/Qwen:Q6_K`) survive.
+ */
+export function parseServerCacheKey(key: string): { baseUrl: string; modelId: string } {
+	// The normalized baseUrl always starts with a scheme (e.g. "http://" or "https://").
+	// A full URL has 2 colons: "scheme:host:port". The model separator is the third
+	// colon. We search from the `//` anchor to find the port colon, then the next
+	// colon after that is the model separator.
+	const slashIndex = key.indexOf("//");
+	if (slashIndex === -1) {
+		// Degenerate — no scheme; fall back to first colon.
+		const idx = key.indexOf(":");
+		return { baseUrl: key.slice(0, idx), modelId: key.slice(idx + 1) };
+	}
+	// Find the first colon after "scheme://" — this is the port separator.
+	const portColonIndex = key.indexOf(":", slashIndex + 2);
+	if (portColonIndex === -1) {
+		// No port — first colon is the model separator.
+		const idx = key.indexOf(":");
+		return { baseUrl: key.slice(0, idx), modelId: key.slice(idx + 1) };
+	}
+	// The model separator is the colon after the port.
+	const modelColonIndex = key.indexOf(":", portColonIndex + 1);
+	if (modelColonIndex === -1) {
+		// No model separator found — entire key is the baseUrl.
+		return { baseUrl: key, modelId: "" };
+	}
+	return { baseUrl: key.slice(0, modelColonIndex), modelId: key.slice(modelColonIndex + 1) };
+}
+
+/**
+ * Drop persisted cache entries whose baseUrl no longer matches any current backend.
+ * Prevents the file from accumulating dead entries when backends are removed.
+ */
+export function pruneStaleEntries(
+	persisted: PersistedConfig,
+	currentBackends: ResolvedBackend[],
+): PersistedConfig {
+	const validBaseUrls = new Set(
+		currentBackends.map((b) => normalizeBaseUrl(b.baseUrl)),
+	);
+	const filtered: Record<string, PersistedDiscoveredProps> = {};
+	for (const [key, entry] of Object.entries(persisted.discoveredProps ?? {})) {
+		const { baseUrl } = parseServerCacheKey(key);
+		if (validBaseUrls.has(baseUrl)) {
+			filtered[key] = entry;
+		}
+	}
+	return { ...persisted, discoveredProps: filtered };
+}
 
 // ---------------------------------------------------------------------------
 // Constants

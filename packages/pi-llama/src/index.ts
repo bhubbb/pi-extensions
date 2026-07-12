@@ -16,7 +16,14 @@ import { resolve } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { resolveConfig } from "./config";
+import {
+	loadPersistedConfig,
+	normalizeBaseUrl,
+	pruneStaleEntries,
+	resolveConfig,
+	savePersistedConfig,
+	serverCacheKey,
+} from "./config";
 import {
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_MAX_TOKENS,
@@ -43,7 +50,7 @@ import {
 } from "./provider";
 import { ModelLoadTracker, SseManager } from "./sse";
 import { registerSetupCommand, registerStatusCommand, registerVersionCommand } from "./commands";
-import type { DiscoveredModel, FailedPropsEntry, PropsResult, ResolvedBackend } from "./types";
+import type { DiscoveredModel, FailedPropsEntry, PersistedConfig, PropsResult, ResolvedBackend } from "./types";
 
 // ---------------------------------------------------------------------------
 // Settings.json fallback for offline model registration
@@ -218,6 +225,12 @@ function applyPropsMetadata(
 		providerModels[b.providerId] = getModels(b.providerId);
 	});
 	registerAllProviders(pi, config, providerModels);
+
+	// Persist to disk so /reload doesn't lose the discovery result.
+	const backend = config.find((b) => b.providerId === providerId);
+	if (backend) {
+		void persistDiscoveredProps(backend.baseUrl, modelId, props, config);
+	}
 }
 
 /**
@@ -451,12 +464,102 @@ async function discoverModelProps(
 }
 
 // ---------------------------------------------------------------------------
+// Persistent cache helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed the in-memory discoveredProps cache from the persisted config on disk.
+ * Translates the server-scoped key (baseUrl:modelId) into the provider-scoped
+ * key (providerId:modelId) that the rest of the extension expects.
+ */
+function seedDiscoveredProps(
+	persisted: PersistedConfig,
+	config: ResolvedBackend[],
+): void {
+	for (const [key, entry] of Object.entries(persisted.discoveredProps ?? {})) {
+		const { baseUrl, modelId } = parseServerCacheKeyFromKey(key);
+		const backend = config.find((b) => normalizeBaseUrl(b.baseUrl) === baseUrl);
+		if (!backend) continue; // stale — backend removed; pruned on next save
+		const inMemoryKey = `${backend.providerId}:${modelId}`;
+		sessionState.discoveredProps.set(inMemoryKey, {
+			contextWindow: entry.contextWindow,
+			maxTokens: entry.maxTokens,
+			supportsThinking: entry.supportsThinking,
+		});
+	}
+}
+
+/**
+ * Parse a persisted cache key back into { baseUrl, modelId }.
+ * Mirrors parseServerCacheKey from config.ts.
+ */
+function parseServerCacheKeyFromKey(key: string): { baseUrl: string; modelId: string } {
+	const slashIndex = key.indexOf("//");
+	if (slashIndex === -1) {
+		const idx = key.indexOf(":");
+		return { baseUrl: key.slice(0, idx), modelId: key.slice(idx + 1) };
+	}
+	const portColonIndex = key.indexOf(":", slashIndex + 2);
+	if (portColonIndex === -1) {
+		const idx = key.indexOf(":");
+		return { baseUrl: key.slice(0, idx), modelId: key.slice(idx + 1) };
+	}
+	const modelColonIndex = key.indexOf(":", portColonIndex + 1);
+	if (modelColonIndex === -1) {
+		return { baseUrl: key, modelId: "" };
+	}
+	return { baseUrl: key.slice(0, modelColonIndex), modelId: key.slice(modelColonIndex + 1) };
+}
+
+/**
+ * Persist newly discovered props to disk (fire-and-forget).
+ * Re-reads the config to avoid clobbering concurrent changes, prunes stale
+ * entries, and saves atomically.
+ */
+async function persistDiscoveredProps(
+	baseUrl: string,
+	modelId: string,
+	props: { contextWindow: number; maxTokens: number; supportsThinking: boolean },
+	config: ResolvedBackend[],
+): Promise<void> {
+	try {
+		let persisted = await loadPersistedConfig();
+		// Prune stale entries before saving
+		persisted = pruneStaleEntries(persisted, config);
+		const key = serverCacheKey(baseUrl, modelId);
+		persisted.discoveredProps = {
+			...(persisted.discoveredProps ?? {}),
+			[key]: {
+				key,
+				contextWindow: props.contextWindow,
+				maxTokens: props.maxTokens,
+				supportsThinking: props.supportsThinking,
+				discoveredAt: Date.now(),
+			},
+		};
+		await savePersistedConfig(persisted);
+	} catch (err) {
+		// Fire-and-forget — log but don't block the request
+		console.debug(
+			`[llama-cpp] failed to persist discoveredProps for ${modelId}: ${(err as Error).message}`,
+		);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Extension factory
 // ---------------------------------------------------------------------------
 
 export default async function (pi: ExtensionAPI) {
 	const config = await resolveConfig();
 	setCurrentConfig(config);
+
+	// Seed the in-memory props cache from the persisted file so that models
+	// show the correct context immediately after /reload, not after re-discovery.
+	const persisted = await loadPersistedConfig();
+	if (persisted.discoveredProps) {
+		seedDiscoveredProps(persisted, config);
+	}
 
 	// ---------------------------------------------------------------------------
 	// Synchronous fallback registration (pre-bind queue)
@@ -649,6 +752,15 @@ export default async function (pi: ExtensionAPI) {
 			} catch {
 				// Runner may still be binding; fallback registration from load still applies.
 			}
+		}
+
+		// Re-probe cached entries to catch server n_ctx changes. Uses autoload=false
+		// (metadata-only — no forced load). discoverModelProps will hit the
+		// in-memory cache first (seeded above) and skip the network call if the
+		// model is still loaded.
+		for (const [inMemoryKey] of sessionState.discoveredProps) {
+			const [pId, mId] = [inMemoryKey.split(":")[0], inMemoryKey.split(":").slice(1).join(":")];
+			void discoverModelProps(pi, pId, mId, ctx, false);
 		}
 
 		const totalModels = config.reduce((sum, b) => sum + (getModels(b.providerId)?.length ?? 0), 0);

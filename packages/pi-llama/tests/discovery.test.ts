@@ -10,6 +10,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "../src/constants";
+import type { PersistedConfig, ResolvedBackend } from "../src/types";
 
 // ---------------------------------------------------------------------------
 // Build helpers
@@ -726,5 +727,124 @@ describe("provider registration with thinking models", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		});
 		expect(Object.keys(normalCompat).length).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// serverCacheKey normalization tests
+// ---------------------------------------------------------------------------
+
+describe("serverCacheKey", () => {
+	it("normalizes trailing /v1", async () => {
+		const { serverCacheKey } = await import("../src/config.ts");
+		const withV1 = serverCacheKey("http://10.8.0.3:8080/v1", "model-a");
+		const withoutV1 = serverCacheKey("http://10.8.0.3:8080", "model-a");
+		expect(withV1).toBe(withoutV1);
+	});
+
+	it("normalizes trailing slash", async () => {
+		const { serverCacheKey } = await import("../src/config.ts");
+		const withSlash = serverCacheKey("http://10.8.0.3:8080/", "model-a");
+		const withoutSlash = serverCacheKey("http://10.8.0.3:8080", "model-a");
+		expect(withSlash).toBe(withoutSlash);
+	});
+
+	it("distinguishes different baseUrls for the same model", async () => {
+		const { serverCacheKey } = await import("../src/config.ts");
+		const key1 = serverCacheKey("http://10.8.0.3:8080/v1", "model-a");
+		const key2 = serverCacheKey("http://10.8.0.4:8080/v1", "model-a");
+		expect(key1).not.toBe(key2);
+	});
+
+	it("preserves model ids with colons (quant suffixes)", async () => {
+		const { serverCacheKey, parseServerCacheKey } = await import("../src/config.ts");
+		const modelId = "unsloth/Qwen:Q6_K";
+		const key = serverCacheKey("http://10.8.0.3:8080/v1", modelId);
+		const parsed = parseServerCacheKey(key);
+		expect(parsed.baseUrl).toBe("http://10.8.0.3:8080");
+		expect(parsed.modelId).toBe(modelId);
+	});
+
+	it("round-trips parseServerCacheKey for simple model ids", async () => {
+		const { serverCacheKey, parseServerCacheKey } = await import("../src/config.ts");
+		const baseUrl = "http://localhost:8080/v1";
+		const modelId = "test-model";
+		const key = serverCacheKey(baseUrl, modelId);
+		const parsed = parseServerCacheKey(key);
+		expect(parsed.baseUrl).toBe("http://localhost:8080");
+		expect(parsed.modelId).toBe(modelId);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Stale entry pruning
+// ---------------------------------------------------------------------------
+
+describe("pruneStaleEntries", () => {
+	it("drops entries whose baseUrl no longer matches any current backend", async () => {
+		const { pruneStaleEntries } = await import("../src/config.ts");
+		const persisted: PersistedConfig = {
+			backends: [
+				{ baseUrl: "http://10.8.0.3:8080/v1" },
+				{ baseUrl: "http://10.8.0.4:8080/v1" },
+			],
+			discoveredProps: {
+				"http://10.8.0.3:8080:model-a": {
+					key: "http://10.8.0.3:8080:model-a",
+					contextWindow: 8192,
+					maxTokens: 8192,
+					supportsThinking: false,
+					discoveredAt: 1,
+				},
+				"http://10.8.0.5:9090:old-model": {
+					key: "http://10.8.0.5:9090:old-model",
+					contextWindow: 4096,
+					maxTokens: 4096,
+					supportsThinking: false,
+					discoveredAt: 2,
+				},
+			},
+		};
+
+		// Only backends 3 and 4 are current — backend 5 was removed
+		const currentBackends: ResolvedBackend[] = [
+			{ providerId: "llama-cpp-0", baseUrl: "http://10.8.0.3:8080/v1", apiKey: "", api: "", authHeader: false, prefix: "", contextWindow: 8192, maxTokens: 16384 },
+			{ providerId: "llama-cpp-1", baseUrl: "http://10.8.0.4:8080/v1", apiKey: "", api: "", authHeader: false, prefix: "", contextWindow: 8192, maxTokens: 16384 },
+		];
+
+		const result = pruneStaleEntries(persisted, currentBackends);
+		expect(Object.keys(result.discoveredProps ?? {}).length).toBe(1);
+		expect("http://10.8.0.3:8080:model-a" in (result.discoveredProps ?? {})).toBe(true);
+		expect("http://10.8.0.5:9090:old-model" in (result.discoveredProps ?? {})).toBe(false);
+	});
+
+	it("keeps all entries when all backends are still present", async () => {
+		const { pruneStaleEntries } = await import("../src/config.ts");
+		const persisted: PersistedConfig = {
+			discoveredProps: {
+				"http://10.8.0.3:8080:model-a": {
+					key: "http://10.8.0.3:8080:model-a",
+					contextWindow: 8192,
+					maxTokens: 8192,
+					supportsThinking: false,
+					discoveredAt: 1,
+				},
+				"http://10.8.0.4:8080:model-b": {
+					key: "http://10.8.0.4:8080:model-b",
+					contextWindow: 131_072,
+					maxTokens: 131_072,
+					supportsThinking: true,
+					discoveredAt: 2,
+				},
+			},
+		};
+
+		const currentBackends: ResolvedBackend[] = [
+			{ providerId: "llama-cpp-0", baseUrl: "http://10.8.0.3:8080/v1", apiKey: "", api: "", authHeader: false, prefix: "", contextWindow: 8192, maxTokens: 16384 },
+			{ providerId: "llama-cpp-1", baseUrl: "http://10.8.0.4:8080/v1", apiKey: "", api: "", authHeader: false, prefix: "", contextWindow: 8192, maxTokens: 16384 },
+		];
+
+		const result = pruneStaleEntries(persisted, currentBackends);
+		expect(Object.keys(result.discoveredProps ?? {}).length).toBe(2);
 	});
 });
