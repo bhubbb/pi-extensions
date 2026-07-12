@@ -14,9 +14,9 @@ export interface LlamaBackendConfig {
 	authHeader?: boolean;
 	/** Prefix to strip from model names during display. */
 	prefix?: string;
-	/** Default context window for offline fallback (when /v1/models meta.n_ctx is missing). Defaults to 8192. */
+	/** Default context window for offline fallback (when /v1/models meta.n_ctx is missing). Defaults to 32768. */
 	contextWindow?: number;
-	/** Default max output tokens for offline fallback. Defaults to 16384. */
+	/** Default max output tokens for offline fallback. Defaults to 32768. */
 	maxTokens?: number;
 }
 

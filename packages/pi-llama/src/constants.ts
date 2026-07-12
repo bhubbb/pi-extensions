@@ -3,10 +3,14 @@
  */
 
 // Fallback for /v1/models entries missing meta.n_ctx.
-export const DEFAULT_CONTEXT_WINDOW = 8192;
+// 32768 covers most modern models (Qwen3, Llama 3, Mistral, Gemma). The real
+// value comes from /props (server n_ctx) or meta.n_ctx_train (GGUF cap).
+export const DEFAULT_CONTEXT_WINDOW = 32768;
 
 // llama.cpp has no output-token cap, so use Pi's own default.
-export const DEFAULT_MAX_TOKENS = 16384;
+// 32768 matches the context fallback; per-request max_tokens is still bounded
+// by the server's actual n_ctx.
+export const DEFAULT_MAX_TOKENS = 32768;
 
 // Timeout for /props discovery (ms) — kept as legacy alias / overall ceiling.
 export const PROPS_TIMEOUT_MS = 120_000;

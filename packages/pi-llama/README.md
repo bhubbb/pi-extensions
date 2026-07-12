@@ -121,8 +121,8 @@ interface LlamaBackendConfig {
   api?: string;          // API type, default: "openai-completions"
   authHeader?: boolean;  // Send Authorization: Bearer header
   prefix?: string;       // Prefix to strip from model names
-  contextWindow?: number; // Default context window for offline fallback (default: 8192)
-  maxTokens?: number;     // Default max output tokens for offline fallback (default: 16384)
+  contextWindow?: number; // Default context window for offline fallback (default: 32768)
+  maxTokens?: number;     // Default max output tokens for offline fallback (default: 32768)
 }
 
 interface PersistedConfig {
