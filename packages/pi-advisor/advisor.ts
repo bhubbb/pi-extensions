@@ -1,11 +1,12 @@
 /**
  * advisor.ts — a pi extension inspired by Claude Code's `advisor` tool, expanded
- * with automatic triggers and a human-invoked manual review command.
+ * with automatic triggers, a human-invoked manual review command, and a
+ * configurable **context policy** for compressed review payloads.
  *
- * Exposes a parameterless `advisor` tool. When the model calls it, the entire
- * active conversation branch (user/assistant text, assistant reasoning, tool
- * calls and their results) is serialized and forwarded to a *stronger* reviewer
- * model, which returns direct, actionable advice.
+ * Exposes a parameterless `advisor` tool. When the model calls it, the active
+ * conversation is serialized according to a context policy (default:
+ * summary + changed-files digest + last N messages) and forwarded to a
+ * *stronger* reviewer model, which returns direct, actionable advice.
  *
  * ── Configuration ────────────────────────────────────────────────────────────
  * Stored as JSON, resolved project-over-global (first scope that defines a key wins):
@@ -13,11 +14,28 @@
  *   Global:  ~/.pi/agent/advisor.json
  *
  *   {
- *     "model":   "provider/id" | "none",   // "none" disables + hides the tool
- *     "thinking":"off|minimal|low|medium|high|xhigh",   // default "high"
- *     "onDone":   true,                     // auto-review when the agent finishes (default off)
- *     "whenStuck": 3,                       // auto-consult after N consecutive tool errors (0/off)
- *     "timeoutMs": 120000                   // advisor call timeout in ms (0 = use provider default)
+ *     "model":   "provider/id" | "none",          // "none" disables + hides the tool
+ *     "thinking":"off|minimal|low|medium|high|xhigh", // default "high"
+ *     "onDone":     true,                           // auto-review when the agent finishes
+ *     "onTodoDone": true,                           // auto-review when the agent completes a todo
+ *     "whenStuck":  3,                              // auto-consult after N consecutive tool errors
+ *     "timeoutMs": 120000,                         // advisor call timeout in ms
+ *
+ *     // Context policy (defaults optimized for local LLMs)
+ *     "contextMode": "summary+tail",  // full | tail | summary | summary+tail
+ *     "tailMessages": 10,             // messages kept from the end
+ *     "stripReasoning": true,         // drop assistant thinking blocks
+ *     "keepToolResults": "recent",    // recent | all | none (within tail)
+ *
+ *     // Changed-files / diff digest
+ *     "diffMode": "stat",             // none | stat | snippets | git-stat | git-snippets
+ *     "diffMaxChars": 4000,
+ *
+ *     // Summary pre-call (modes summary / summary+tail)
+ *     "summaryModel": "executor",     // executor | provider/id | null
+ *     "summaryMaxTokens": 1024,
+ *     "summaryRefreshEvery": 8,       // reuse cached summary if <N new msgs
+ *     "summaryTimeoutMs": 60000
  *   }
  *
  * Precedence for model/thinking: env (PI_ADVISOR_MODEL / PI_ADVISOR_EFFORT) >
@@ -27,13 +45,25 @@
  * Timeout: env PI_ADVISOR_TIMEOUT_MS > project > global. Default 120s (2 minutes).
  * When the advisor call times out, the running model sees an error instead of hanging.
  *
+ * ── Context modes ────────────────────────────────────────────────────────────
+ *   full        — entire transcript (reasoning-stripped by default).
+ *   tail        — last N messages + changed-files digest.
+ *   summary     — AI-generated summary + digest + last 2-3 messages.
+ *   summary+tail  — summary + digest + last N messages (default).
+ *
  * ── Commands (inside pi) ─────────────────────────────────────────────────────
  *   /advisor                      pick model (like /model) → scope → thinking
  *   /advisor <provider/id> [lvl]  set model directly → choose project vs global
  *   /advisor none | default       disable / clear a scope → choose scope
  *   /advisor on-done on|off       toggle auto-review-on-finish → choose scope
+ *   /advisor on-todo on|off       toggle auto-review on todo completion → choose scope
  *   /advisor when-stuck off|<N>   set the consecutive-error trigger → choose scope
- *   /advisor status               show the resolved configuration
+ *   /advisor status               show the resolved configuration (incl. policy)
+ *   /advisor context <mode>       set context mode (full|tail|summary|summary+tail)
+ *   /advisor tail <N>             set tail message count
+ *   /advisor diff <mode>          set diff mode (none|stat|snippets|git-stat|git-snippets)
+ *   /advisor strip-reasoning on|off
+ *   /advisor summary-model <spec|off>
  *   /advise [show|pipe|steer]     run a one-off review; show it only, or inject it into the chat
  *
  * Automatic triggers default OFF — out of the box the regular model decides when to
@@ -51,10 +81,35 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+// ── New module imports (context policy) ───────────────────────────────────────
+import {
+  resolveEffectiveConfig,
+  THINKING_LEVELS,
+  effectiveModelSpec,
+  effectiveThinking,
+  effectiveTriggers,
+  effectiveTimeoutMs,
+  isDisabled,
+  isUnconfigured,
+  DISABLED,
+  writeConfig,
+  contextProjectTrusted,
+  projectConfigPath,
+  globalConfigPath,
+  type AdvisorConfig,
+  type ThinkingLevel,
+  type ContextMode,
+  type DiffMode,
+  type KeepToolResults,
+} from "./src/config.ts";
+
+// Re-export for backward compatibility
+export { validateAdvisorConfig } from "./src/config.ts";
+import { buildAdvisorPayload, selectTail } from "./src/context-policy.ts";
+import { collectChangesFromEvents, collectChangesFromBranch, renderDigest, type ChangeEvent, isVerificationCommand } from "./src/diff.ts";
+import { getSummary, type SummaryCache } from "./src/summarizer.ts";
+
 const DEFAULT_THINKING: ThinkingLevel = "high";
-const DISABLED = "none";
 const MAX_VISIBLE_MODEL_CHOICES = 12;
 export const MAX_TOOL_CALL_ARGS_CHARS = 800;
 export const MAX_TOOL_RESULT_CHARS = 2000;
@@ -66,10 +121,19 @@ const ADVISOR_FIRST_TOKEN_ITEMS: AutocompleteItem[] = [
   { value: "none", label: "none", description: "Disable advisor for a selected scope" },
   { value: "default", label: "default", description: "Clear advisor settings for a selected scope" },
   { value: "on-done", label: "on-done", description: "Toggle automatic review when the agent finishes" },
+  { value: "on-todo", label: "on-todo", description: "Toggle automatic review when the agent completes a todo" },
   { value: "when-stuck", label: "when-stuck", description: "Auto-consult after repeated errors or identical tool calls" },
   { value: "status", label: "status", description: "Show the resolved advisor configuration" },
+  { value: "context", label: "context", description: "Set context mode (full|tail|summary|summary+tail)" },
+  { value: "tail", label: "tail", description: "Set tail message count (integer >= 2)" },
+  { value: "diff", label: "diff", description: "Set diff mode (none|stat|snippets|git-stat|git-snippets)" },
+  { value: "strip-reasoning", label: "strip-reasoning", description: "Toggle reasoning block stripping (on|off)" },
+  { value: "summary-model", label: "summary-model", description: "Set summary model (executor|provider/id|off)" },
   { value: "?", label: "?", description: "Show /advisor usage" },
 ];
+
+const CONTEXT_MODES: ContextMode[] = ["full", "tail", "summary", "summary+tail"];
+const DIFF_MODES: DiffMode[] = ["none", "stat", "snippets", "git-stat", "git-snippets"];
 
 const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
   off: "Disable extended thinking",
@@ -115,13 +179,46 @@ export function getAdvisorCompletions(args: string): AutocompleteItem[] | null {
       .filter((v) => v.startsWith(normalized))
       .map((v) => ({ value: `${tokens[0]} ${v}`, label: v }));
   }
+  if (head === "on-todo") {
+    return ON_OFF
+      .filter((v) => v.startsWith(normalized))
+      .map((v) => ({ value: `${tokens[0]} ${v}`, label: v }));
+  }
   if (head === "when-stuck") {
     const off = "off".startsWith(normalized) ? [{ value: `${tokens[0]} off`, label: "off" }] : [];
-    // Suggest common numbers
     const nums = ["1", "2", "3", "5", "0"]
       .filter((n) => n.startsWith(normalized))
       .map((n) => ({ value: `${tokens[0]} ${n}`, label: n }));
     return [...off, ...nums];
+  }
+  if (head === "context") {
+    return CONTEXT_MODES
+      .filter((m) => m.startsWith(normalized))
+      .map((m) => ({ value: `${tokens[0]} ${m}`, label: m }));
+  }
+  if (head === "tail") {
+    return ["2", "4", "6", "8", "10", "15", "20"]
+      .filter((n) => n.startsWith(normalized))
+      .map((n) => ({ value: `${tokens[0]} ${n}`, label: n }));
+  }
+  if (head === "diff") {
+    return DIFF_MODES
+      .filter((m) => m.startsWith(normalized))
+      .map((m) => ({ value: `${tokens[0]} ${m}`, label: m }));
+  }
+  if (head === "strip-reasoning") {
+    return ["on", "off"]
+      .filter((v) => v.startsWith(normalized))
+      .map((v) => ({ value: `${tokens[0]} ${v}`, label: v }));
+  }
+  if (head === "summary-model") {
+    const items = ["executor", "off"]
+      .filter((v) => v.startsWith(normalized))
+      .map((v) => ({ value: `${tokens[0]} ${v}`, label: v }));
+    const models = cachedModelSpecs
+      .filter((spec) => spec.toLowerCase().includes(normalized))
+      .map((spec) => ({ value: `${tokens[0]} ${spec}`, label: spec }));
+    return [...items, ...models];
   }
   if (head === "none" || head === "default" || head === "status") {
     return []; // These are terminal commands
@@ -195,163 +292,6 @@ Do not restate the transcript back; the agent already has it. Lead with your ver
 Always return your advice as visible assistant text. Do not return reasoning-only output.`;
 
 // ── Config files ────────────────────────────────────────────────────────────
-
-type AdvisorConfig = {
-  model?: string;
-  thinking?: ThinkingLevel;
-  onDone?: boolean;
-  whenStuck?: number;
-  timeoutMs?: number;
-};
-
-const globalConfigPath = () => path.join(os.homedir(), ".pi", "agent", "advisor.json");
-const projectConfigPath = (cwd: string) => path.join(cwd, ".pi", "advisor.json");
-
-export function validateAdvisorConfig(raw: unknown, source = "advisor config"): AdvisorConfig {
-  const warn = (message: string) => console.warn(`[pi-advisor] Ignoring invalid ${source}: ${message}`);
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    warn("expected a JSON object");
-    return {};
-  }
-
-  const input = raw as Record<string, unknown>;
-  const clean: AdvisorConfig = {};
-
-  if (input.model !== undefined) {
-    if (typeof input.model === "string") clean.model = input.model;
-    else warn('"model" must be a string');
-  }
-  if (input.thinking !== undefined) {
-    if (typeof input.thinking === "string" && (THINKING_LEVELS as readonly string[]).includes(input.thinking)) {
-      clean.thinking = input.thinking as ThinkingLevel;
-    } else {
-      warn(`"thinking" must be one of: ${THINKING_LEVELS.join(", ")}`);
-    }
-  }
-  if (input.onDone !== undefined) {
-    if (typeof input.onDone === "boolean") clean.onDone = input.onDone;
-    else warn('"onDone" must be a boolean');
-  }
-  if (input.whenStuck !== undefined) {
-    if (Number.isInteger(input.whenStuck) && (input.whenStuck as number) >= 0) clean.whenStuck = input.whenStuck as number;
-    else warn('"whenStuck" must be a non-negative integer');
-  }
-  if (input.timeoutMs !== undefined) {
-    if (Number.isInteger(input.timeoutMs) && (input.timeoutMs as number) >= 0) clean.timeoutMs = input.timeoutMs as number;
-    else warn('"timeoutMs" must be a non-negative integer');
-  }
-
-  return clean;
-}
-
-function readConfig(file: string): AdvisorConfig {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(file, "utf-8");
-  } catch (err: any) {
-    if (err?.code !== "ENOENT") console.warn(`[pi-advisor] Could not read ${file}: ${err?.message ?? err}`);
-    return {};
-  }
-
-  try {
-    return validateAdvisorConfig(JSON.parse(raw), file);
-  } catch (err: any) {
-    console.warn(`[pi-advisor] Ignoring invalid JSON in ${file}: ${err?.message ?? err}`);
-    return {};
-  }
-}
-
-function writeConfig(file: string, cfg: AdvisorConfig): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const clean: AdvisorConfig = {};
-  if (cfg.model !== undefined) clean.model = cfg.model;
-  if (cfg.thinking !== undefined) clean.thinking = cfg.thinking;
-  if (cfg.onDone !== undefined) clean.onDone = cfg.onDone;
-  if (cfg.whenStuck !== undefined) clean.whenStuck = cfg.whenStuck;
-  if (cfg.timeoutMs !== undefined) clean.timeoutMs = cfg.timeoutMs;
-  fs.writeFileSync(file, JSON.stringify(clean, null, 2) + "\n", "utf-8");
-}
-
-// ── Resolution ──────────────────────────────────────────────────────────────
-
-const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
-
-type EffectiveAdvisorConfig = {
-  spec: string | undefined;
-  source: string;
-  thinking: ThinkingLevel;
-  onDone: boolean;
-  whenStuck: number;
-  timeoutMs: number;
-};
-
-function envThinkingLevel(): ThinkingLevel | undefined {
-  const env = process.env.PI_ADVISOR_EFFORT?.trim();
-  return env && (THINKING_LEVELS as readonly string[]).includes(env) ? (env as ThinkingLevel) : undefined;
-}
-
-function envTimeoutMs(): number | undefined {
-  const env = process.env.PI_ADVISOR_TIMEOUT_MS;
-  if (!env) return undefined;
-  const n = Number(env);
-  return Number.isInteger(n) && n >= 0 ? n : undefined;
-}
-
-function contextProjectTrusted(ctx: ExtensionContext | { cwd: string }): boolean {
-  const fn = (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted;
-  return typeof fn === "function" ? fn.call(ctx) : true;
-}
-
-function resolveEffectiveConfig(cwd: string, projectTrusted = true): EffectiveAdvisorConfig {
-  const project = projectTrusted ? readConfig(projectConfigPath(cwd)) : {};
-  const global = readConfig(globalConfigPath());
-  const envModel = process.env.PI_ADVISOR_MODEL?.trim();
-
-  let model: Pick<EffectiveAdvisorConfig, "spec" | "source">;
-  if (envModel) {
-    model = { spec: envModel, source: "env PI_ADVISOR_MODEL" };
-  } else if (project.model !== undefined) {
-    model = { spec: project.model, source: "project" };
-  } else if (global.model !== undefined) {
-    model = { spec: global.model, source: "global" };
-  } else {
-    model = { spec: undefined, source: "default" };
-  }
-
-  return {
-    ...model,
-    thinking: envThinkingLevel() ?? project.thinking ?? global.thinking ?? DEFAULT_THINKING,
-    onDone: project.onDone ?? global.onDone ?? false,
-    whenStuck: project.whenStuck ?? global.whenStuck ?? 0,
-    timeoutMs: envTimeoutMs() ?? project.timeoutMs ?? global.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  };
-}
-
-function effectiveModelSpec(cwd: string, projectTrusted = true): { spec: string | undefined; source: string } {
-  const { spec, source } = resolveEffectiveConfig(cwd, projectTrusted);
-  return { spec, source };
-}
-
-function effectiveThinking(cwd: string, projectTrusted = true): ThinkingLevel {
-  return resolveEffectiveConfig(cwd, projectTrusted).thinking;
-}
-
-function effectiveTriggers(cwd: string, projectTrusted = true): { onDone: boolean; whenStuck: number } {
-  const { onDone, whenStuck } = resolveEffectiveConfig(cwd, projectTrusted);
-  return { onDone, whenStuck };
-}
-
-function effectiveTimeoutMs(cwd: string, projectTrusted = true): number {
-  return resolveEffectiveConfig(cwd, projectTrusted).timeoutMs;
-}
-
-function isDisabled(cwd: string, projectTrusted = true): boolean {
-  return resolveEffectiveConfig(cwd, projectTrusted).spec === DISABLED;
-}
-
-function isUnconfigured(cwd: string, projectTrusted = true): boolean {
-  return resolveEffectiveConfig(cwd, projectTrusted).spec === undefined;
-}
 
 type Resolved = {
   model: Model<Api>;
@@ -521,7 +461,9 @@ function extractAdvisorText(response: any): {
 async function runAdvisor(
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
-  notifyWarnings = true,
+  notifyWarnings: boolean,
+  changeEvents: ChangeEvent[],
+  summaryCacheRef: { current: SummaryCache | null },
 ): Promise<{ text: string; disabled?: boolean }> {
   const { spec } = effectiveModelSpec(ctx.cwd, contextProjectTrusted(ctx));
   if (spec === undefined) {
@@ -540,7 +482,50 @@ async function runAdvisor(
   const providerTimeoutMs = timeoutMs === 0 ? undefined : timeoutMs;
   if (notifyWarnings && ctx.hasUI) for (const w of warnings) ctx.ui.notify(w, "warning");
 
-  const transcript = buildTranscript(ctx.sessionManager.getBranch() as AnyEntry[], model);
+  // ── Build compressed context payload ───────────────────────────────────────
+  const cfg = resolveEffectiveConfig(ctx.cwd, contextProjectTrusted(ctx));
+  const entries = ctx.sessionManager.getBranch() as AnyEntry[];
+
+  // Diff digest (primary: harvested events; fallback: branch)
+  let diffDigest = "";
+  if (cfg.diffMode !== "none") {
+    const changes = collectChangesFromEvents(changeEvents, cfg.diffMode, cfg.diffMaxChars);
+    if (changes.length === 0) {
+      // D4 fallback: branch harvest
+      const branchChanges = collectChangesFromBranch(entries, cfg.diffMode, cfg.diffMaxChars);
+      diffDigest = renderDigest(branchChanges, [], cfg.diffMode, cfg.diffMaxChars);
+    } else {
+      diffDigest = renderDigest(changes, [], cfg.diffMode, cfg.diffMaxChars);
+    }
+  }
+
+  // Summary (optional, for summary / summary+tail modes)
+  let summary: string | undefined;
+  if ((cfg.contextMode === "summary" || cfg.contextMode === "summary+tail") && cfg.summaryModel !== null) {
+    const summaryResult = await getSummary(ctx, {
+      summaryModel: cfg.summaryModel,
+      entries,
+      stripReasoning: cfg.stripReasoning,
+      maxTokens: cfg.summaryMaxTokens,
+      timeoutMs: cfg.summaryTimeoutMs,
+      signal,
+      refreshEvery: cfg.summaryRefreshEvery,
+      cache: summaryCacheRef.current,
+      setCache: (c) => { summaryCacheRef.current = c; },
+    });
+    if (!("error" in summaryResult)) {
+      summary = summaryResult.text;
+    }
+  }
+
+  // Assemble payload (D3: summary failure degrades gracefully)
+  const transcript = buildAdvisorPayload(entries, cfg.contextMode, {
+    tailMessages: cfg.tailMessages,
+    stripReasoning: cfg.stripReasoning,
+    keepToolResults: cfg.keepToolResults,
+    diffDigest,
+    summary,
+  }, model);
   if (!transcript.trim()) return { text: "Advisor: the conversation is empty — nothing to review yet." };
 
   const buildRequest = (visibleTextOnly = false) => ({
@@ -552,11 +537,11 @@ async function runAdvisor(
           {
             type: "text" as const,
             text:
-              `Here is the full working transcript so far. Review it and advise.\n\n` +
+              `Here is the current context for review.\n\n` +
               (visibleTextOnly
                 ? `Return your advice as visible plain text only. Do not return reasoning-only output.\n\n`
                 : "") +
-              `<transcript>\n${transcript}\n</transcript>`,
+              transcript,
           },
         ],
         timestamp: Date.now(),
@@ -640,6 +625,24 @@ async function scrollableSelect(ctx: ExtensionContext, title: string, choices: s
   });
 }
 
+// ── Todo completion detection helper ────────────────────────────────────────
+// Pure function: no pi imports, no side effects. Supports both the rich status
+// tool (action: "update", status: "completed") and the example toggle tool
+// (action: "toggle", details.done: true).
+export function isTodoCompletion(input: unknown, details: unknown): boolean {
+  if (!input || typeof input !== "object") return false;
+  const inp = input as Record<string, unknown>;
+
+  // Rich tool: action "update" with status "completed" in input
+  if (inp.action === "update" && inp.status === "completed") return true;
+  // Rich tool: action "update" with status in result details
+  if (inp.action === "update" && details && typeof details === "object" && (details as Record<string, unknown>).status === "completed") return true;
+  // Example toggle tool: action "toggle" with done: true in result details
+  if (inp.action === "toggle" && details && typeof details === "object" && (details as Record<string, unknown>).done === true) return true;
+
+  return false;
+}
+
 // ── Extension ───────────────────────────────────────────────────────────────
 
 export default function advisorExtension(pi: ExtensionAPI) {
@@ -650,6 +653,10 @@ export default function advisorExtension(pi: ExtensionAPI) {
   let loopCount = 0;
   let autoReviewedThisRound = false;
   let autoRunning = false; // guard against re-entrancy from our own injections
+
+  // Context policy state
+  let changeEvents: ChangeEvent[] = [];
+  let summaryCache: SummaryCache = null;
 
   const applyActivation = (cwd: string, projectTrusted = true) => {
     const active = pi.getActiveTools();
@@ -666,7 +673,7 @@ export default function advisorExtension(pi: ExtensionAPI) {
   ) => {
     autoRunning = true;
     try {
-      const { text, disabled } = await runAdvisor(ctx, ctx.signal, false);
+      const { text, disabled } = await runAdvisor(ctx, ctx.signal, false, changeEvents, { current: summaryCache });
       if (!disabled) pi.sendUserMessage(buildMessage(text), { deliverAs });
     } catch {
       /* never let an auto-trigger break the turn */
@@ -734,20 +741,20 @@ export default function advisorExtension(pi: ExtensionAPI) {
     name: "advisor",
     label: "Advisor",
     description:
-      "Consult a configured stronger reviewer model that sees your full conversation transcript. " +
-      "Takes NO parameters — if a reviewer model is configured, the entire active conversation " +
-      "(your task, reasoning, every tool call and result) is forwarded automatically. " +
+      "Consult a configured stronger reviewer model. Takes NO parameters. " +
+      "If a reviewer model is configured, a compressed context (summary, changed-files " +
+      "digest, and recent messages) is forwarded — not the full transcript. " +
       "If no reviewer model is configured, this sends nothing and returns setup guidance. " +
       "Returns direct, actionable advice.",
-    promptSnippet: "Consult a configured stronger reviewer model on the full transcript before/after substantive work",
+    promptSnippet: "Consult a configured stronger reviewer model on the current context before/after substantive work",
     promptGuidelines: [
       "Call advisor before substantive work (before writing, before committing to an interpretation or assumption), when stuck (errors recurring, approach not converging), and when you believe the task is complete.",
-      "advisor takes no arguments; if no reviewer model is configured, it sends nothing and returns setup guidance. Otherwise it forwards the whole conversation. Give its advice serious weight, but if a concrete step it suggests fails empirically or contradicts primary-source evidence you hold, adapt rather than follow blindly.",
+      "advisor takes no arguments; if no reviewer model is configured, it sends nothing and returns setup guidance. Otherwise it forwards a compressed context (summary, changed-files digest, recent messages). Give its advice serious weight, but if a concrete step it suggests fails empirically or contradicts primary-source evidence you hold, adapt rather than follow blindly.",
     ],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal, onUpdate, ctx) {
       onUpdate?.({ content: [{ type: "text", text: "Consulting advisor…" }], details: {} });
-      const { text } = await runAdvisor(ctx, signal);
+      const { text } = await runAdvisor(ctx, signal, true, changeEvents, { current: summaryCache });
       return { content: [{ type: "text", text }], details: {} };
     },
   });
@@ -767,9 +774,49 @@ export default function advisorExtension(pi: ExtensionAPI) {
   // "When stuck": after N consecutive tool errors, or N repeated identical tool calls,
   // consult and steer the agent.
   pi.on("tool_result", async (event, ctx) => {
+    // Accumulate change events for diff harvesting (D4)
+    if (event.input && typeof event.input === "object") {
+      const inp = event.input as Record<string, unknown>;
+      if (event.toolName === "edit" && Array.isArray(inp.edits)) {
+        const edits = (inp.edits as any[])
+          .filter((e): e is { oldText: string; newText: string } =>
+            e?.oldText && e?.newText && typeof e.oldText === "string" && typeof e.newText === "string"
+          );
+        const path = (typeof inp.path === "string" && inp.path) || "";
+        if (edits.length) {
+          changeEvents.push({ kind: "edit", path, edits, isError: !!event.isError, ts: Date.now() });
+        }
+      } else if (event.toolName === "write") {
+        const path = (typeof inp.path === "string" && inp.path) || "";
+        const content = typeof inp.content === "string" ? inp.content : "";
+        if (content) {
+          changeEvents.push({ kind: "write", path, content, isError: !!event.isError, ts: Date.now() });
+        }
+      } else if (event.toolName === "bash") {
+        const command = typeof (inp as any).command === "string" ? (inp as any).command : "";
+        if (command) {
+          changeEvents.push({ kind: "bash", command, isError: !!event.isError, ts: Date.now() });
+        }
+      }
+    }
+
     const projectTrusted = contextProjectTrusted(ctx);
-    const { whenStuck } = effectiveTriggers(ctx.cwd, projectTrusted);
-    if (isDisabled(ctx.cwd, projectTrusted) || isUnconfigured(ctx.cwd, projectTrusted) || whenStuck <= 0 || autoRunning || event.toolName === "advisor") return;
+    const { whenStuck, onTodoDone } = effectiveTriggers(ctx.cwd, projectTrusted);
+
+    // Common guards (disabled, unconfigured, autoRunning, advisor tool)
+    if (isDisabled(ctx.cwd, projectTrusted) || isUnconfigured(ctx.cwd, projectTrusted) || autoRunning || event.toolName === "advisor") return;
+
+    // onTodoDone trigger: fire advisor when the agent completes a todo
+    if (onTodoDone && event.toolName === "todo" && isTodoCompletion(event.input, event.details)) {
+      await runAutomaticReview(
+        ctx,
+        (text) => `The agent marked a todo as completed. A reviewer model was consulted:\n\n${text}\n\nAddress any valid issues before moving on.`,
+        "steer",
+      );
+    }
+
+    // whenStuck trigger (only when enabled)
+    if (whenStuck <= 0) return;
 
     // Build a fingerprint from the tool call for loop detection.
     const fingerprint = `${event.toolName}:${JSON.stringify(event.input ?? "")}`;
@@ -860,7 +907,7 @@ export default function advisorExtension(pi: ExtensionAPI) {
       }
 
       try {
-        const { text, disabled } = await runAdvisor(ctx, ctx.signal);
+        const { text, disabled } = await runAdvisor(ctx, ctx.signal, true, changeEvents, { current: summaryCache });
         if (disabled) {
           if (ctx.hasUI) ctx.ui.notify(text, "warning");
           return;
@@ -904,6 +951,7 @@ export default function advisorExtension(pi: ExtensionAPI) {
             "  /advisor <provider/id> [level] — set model directly → choose scope\n" +
             "  /advisor none / default        — disable / clear a scope → choose scope\n" +
             "  /advisor on-done on|off        — toggle auto-review on finish → choose scope\n" +
+            "  /advisor on-todo on|off        — toggle auto-review on todo completion → choose scope\n" +
             "  /advisor when-stuck off|<N>    — trigger advisor on N consecutive errors or N repeated identical tool calls → choose scope\n" +
             "  /advisor status                — show resolved configuration\n" +
             "  /advisor ?                     — show this help",
@@ -920,7 +968,7 @@ export default function advisorExtension(pi: ExtensionAPI) {
         const trustNote = projectTrusted ? "" : " · project config ignored: project is not trusted";
         ctx.ui.notify(
           `Advisor: ${resolved} [${source}] · thinking ${effectiveThinking(cwd, projectTrusted)} · ` +
-            `on-done ${t.onDone ? "on" : "off"} · when-stuck ${t.whenStuck || "off"}${trustNote}. ` +
+            `on-done ${t.onDone ? "on" : "off"} · on-todo ${t.onTodoDone ? "on" : "off"} · when-stuck ${t.whenStuck || "off"}${trustNote}. ` +
             `(project: ${projectConfigPath(cwd)} · global: ${globalConfigPath()})`,
           "info",
         );
@@ -941,7 +989,7 @@ export default function advisorExtension(pi: ExtensionAPI) {
         return scope === PROJECT_OPT ? projectConfigPath(cwd) : globalConfigPath();
       };
       const persist = (file: string, patch: AdvisorConfig) => {
-        writeConfig(file, { ...readConfig(file), ...patch });
+        writeConfig(file, patch);
         applyActivation(cwd, contextProjectTrusted(ctx));
       };
 
@@ -953,6 +1001,14 @@ export default function advisorExtension(pi: ExtensionAPI) {
         if (!file) return;
         persist(file, { onDone: v === "on" });
         return ctx.ui.notify(`Auto-review on finish: ${v}.`, "info");
+      }
+      if (head === "on-todo") {
+        const v = tokens[1]?.toLowerCase();
+        if (v !== "on" && v !== "off") return ctx.ui.notify("Usage: /advisor on-todo on|off", "error");
+        const file = await pickScope();
+        if (!file) return;
+        persist(file, { onTodoDone: v === "on" });
+        return ctx.ui.notify(`Auto-review on todo completion: ${v}.`, "info");
       }
       if (head === "when-stuck") {
         const v = tokens[1]?.toLowerCase();

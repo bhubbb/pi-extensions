@@ -1,90 +1,243 @@
-# Implementation: pi-advisor context policy + always trigger + monorepo consolidation
+# Implementation: pi-advisor context policy + always trigger
 
-## Goal
+## Why we're doing this
 
-Three things, in order:
+The upstream `pi-advisor` (from `hknet/pi-extensions`) sends the **entire
+conversation transcript** to the advisor model on every review. When the
+advisor is a local LLM with a small context window, this is wasteful and
+often overflows. We want two things:
 
-1. **Consolidate into a monorepo** — move `pi-advisor`, `pi-llama-mb`, and
-   `pi-omlx` into one repo (`bhubbb/pi-extensions`) as workspace packages.
-   The standalone repos for `pi-llama-mb` and `pi-omlx` stay intact; the
-   monorepo is the canonical dev surface going forward.
+1. **Send less context** — instead of the full transcript every time, let
+   the user choose to send just the last N messages, a compressed summary,
+   or both. The advisor still gets enough to give useful feedback, but we
+   stop burning tokens on the whole history.
 
-2. **Add configurable context modes to pi-advisor** — keep every existing
-   mode (`onDone`, `whenStuck`, the `advisor` tool, `/advise`), but stop
-   always sending the full transcript. Add `full`, `tail`, `summary`, and
-   `summary+tail` modes so the advisor can be sent a cheaper view (last N
-   messages, a generated summary, or both). Default to `summary+tail`.
+2. **Run automatically on every turn** — add an `always` trigger so the
+   advisor reviews before the agent processes each user message, not just
+   when the agent gets stuck or finishes. This makes the advisor a
+   per-turn reviewer, shaping the agent's approach from the start.
 
-3. **Add an `always` auto-trigger** — a new trigger that runs the advisor
-   before the agent processes each user input, injecting the review as a
-   `steer`. Existing triggers (`onDone`, `whenStuck`) are unchanged and
-   still work alongside it.
+**Critical constraint:** all existing modes must keep working unchanged.
+The `advisor` tool, `/advise` command, `onDone`, and `whenStuck` are
+preserved exactly. The new context modes and `always` trigger are
+additive.
 
-## Non-goals
+## What already exists (do not rebuild)
 
-- Do **not** remove or change the existing `onDone`, `whenStuck`, `advisor`
-  tool, or `/advise` behavior. They must keep working as before.
-- Do **not** change `pi-llama-mb` or `pi-omlx` behavior — they're being
-  migrated as-is.
-- Do **not** re-implement the `src/` modules from scratch. They already
-  exist (recovered from session history) and are the foundation. The work
-  is wiring + the `always` field, not rebuilding them.
+The `src/` modules are already written and present in the repo
+(recovered from session history). They implement the context policy
+internals. The work is **wiring them into `advisor.ts`** and **adding the
+`always` config field**, not reimplementing them.
 
-## Current state of the repo
+### `src/config.mjs` — config validation + resolution
 
-Already present (recovered, uncommitted):
+Exports:
+- `resolveEffectiveConfig(cwd, projectTrusted)` → returns an object with
+  `spec`, `source`, `thinking`, `onDone`, `whenStuck`, `timeoutMs`,
+  `always`, `contextMode`, `tailMessages`, `stripReasoning`,
+  `keepToolResults`, `diffMode`, `diffMaxChars`, `summaryModel`,
+  `summaryMaxTokens`, `summaryRefreshEvery`, `summaryTimeoutMs`
+- `validateAdvisorConfig(raw, source)` → validates a config object,
+  warns on invalid keys, returns clean config
+- `readConfig(file)` → reads + validates a JSON config file
+- `writeConfig(file, patch)` → merges patch into existing file, writes
+- `isDisabled(cfg)` → true if `cfg.spec === "none"`
+- `isUnconfigured(cfg)` → true if `cfg.spec === undefined`
+- `normalizeDiffMode(mode, projectTrusted)` → downgrades git-* modes to
+  non-git when project is untrusted
+- `DEFAULTS`, `THINKING_LEVELS`, `DEFAULT_THINKING`, `DEFAULT_TIMEOUT_MS`
 
-- `packages/pi-advisor/src/config.mjs` — config validation + resolution
-- `packages/pi-advisor/src/diff.mjs` — patch harvest + digest rendering
-- `packages/pi-advisor/src/context-policy.mjs` — tail selection + payload
-- `packages/pi-advisor/src/summarizer.mjs` — summary pre-call + cache
-- `packages/pi-advisor/tests/*.test.mjs` — unit tests
-- `packages/pi-advisor/AGENTS.md` — module documentation
-- `packages/pi-llama/` — copied from standalone repo, renamed from
-  `pi-llama-mb` (the `-mb` is dropped; package `name` was already `pi-llama`)
-- `packages/pi-omlx/` — copied from standalone repo
+**Note:** `isDisabled`/`isUnconfigured` here take a **config object**,
+not `(cwd, projectTrusted)`. The local wrappers in `advisor.ts` resolve
+config first, then call these.
 
-Removed (staged as deletions):
-- `packages/pi-thinking-command/` — hknet's, not ours
-- `packages/pi-timestamp/` — hknet's, not ours
+**Already has `always`** — `DEFAULTS.always`, `envAlways()`, validation,
+resolution, and writeConfig merge for `always` were added in a prior
+session. Verify they're present; if not, add them (see Tasks).
 
-Still needs doing: see Tasks below.
+### `src/context-policy.mjs` — tail selection + payload assembly
 
-## Design: context modes
+Exports:
+- `renderEntry(entry, opts)` → renders one branch entry as a string.
+  `opts` controls `stripReasoning` and `showToolResults`. Returns null
+  for entries that shouldn't be shown.
+- `selectTail(entries, tailMessages)` → returns `{ kept, omittedCount,
+  firstUserReInserted }`. Keeps the first user message + last N entries.
+- `buildAdvisorPayload(entries, mode, opts, model)` → **the core
+  function**. Assembles the advisor's transcript text according to
+  `mode`:
+  - `"full"` → all entries (optionally stripped), oldest-first trimmed on
+    overflow
+  - `"tail"` → first user + last N + diff digest
+  - `"summary"` → summary + diff + last 2-3 msgs, degrades to tail if
+    summary unavailable
+  - `"summary+tail"` → summary + last N + diff digest
+  - `opts` must include: `stripReasoning`, `keepToolResults`,
+    `tailMessages`, `diffDigest`, and `summary` (the summary text or
+    null)
+  - `model` is used for overflow math (maxTokens, contextWindow)
+  - Returns a string (the payload text)
 
-The advisor currently calls `buildTranscript(branch, model)` which sends
-the entire conversation. The change is to replace that with
-`buildAdvisorPayload(branch, model, cfg, summary, digest)` which assembles
-a payload according to `cfg.contextMode`:
+### `src/diff.mjs` — patch harvest + digest rendering
 
-| Mode | What gets sent |
-|---|---|
-| `full` | The entire branch (current behavior; backward compat) |
-| `tail` | First user message + last N entries (omitted marker in between) |
-| `summary` | A compressed summary of the whole conversation |
-| `summary+tail` | Summary + last N entries (the new default) |
+Exports:
+- `collectChangesFromEvents(events, diffMode, maxChars)` → takes an
+  array of accumulated change events (`{ kind, path, patch?, content?,
+  command?, isError, ts }`), dedupes by path, returns a changes list
+- `renderDigest(changes, verifications, diffMode, maxChars)` → renders
+  the changes as a stat or snippets digest string
+- `collectChangesFromBranch(entries, diffMode, maxChars)` → fallback:
+  reconstructs changes from branch entries (toolCall args)
+- `collectChangesFromGit(cwd, mode, maxChars, projectTrusted)` →
+  opt-in git diff (requires projectTrusted)
+- `countPatchChanges(patch)`, `isVerificationCommand(command)`,
+  `renderStatDigest`, `renderSnippetsDigest`
 
-The payload is built by `src/context-policy.mjs`. The summary is produced
-by `src/summarizer.mjs` (with a rolling cache refreshed every
-`summaryRefreshEvery` messages). The diff digest comes from
-`src/diff.mjs` (harvested from accumulated `tool_result` events).
+### `src/summarizer.mjs` — summary pre-call + rolling cache
 
-A separate system prompt (`ADVISOR_SYSTEM_PROMPT_COMPRESSED`) is used for
-non-`full` modes because the advisor is seeing a compressed view and needs
-to be told not to assume it sees every tool result.
+Exports:
+- `getSummary(ctx, opts)` → **async**. Returns `{ text, source }` or
+  `{ error }`. `opts` must include: `summaryModel`, `entries`,
+  `stripReasoning`, `maxTokens`, `timeoutMs`, `signal`, `refreshEvery`,
+  `cache`, `setCache`. Uses a rolling cache — only regenerates when the
+  branch has grown by `refreshEvery` messages since last summary.
+  `summaryModel: "executor"` uses the running model; a spec string uses
+  a separate model.
+- `SummaryCache` — an empty object template for the cache shape
+  (`{ text, branchLen, source }`)
+- `SummarySource` — `{ CACHE, EXECUTOR, MODEL }` enum
 
-## Design: the `always` trigger
+## What we're changing
 
-A new config field `always: boolean` (default `false`). When true, the
-`input` event handler runs the advisor *before* the agent processes the
-user's message and injects the result as a `steer` so it shapes the
-current turn. Guarded by `autoRunning` to prevent re-entrancy.
+### Change 1: `advisor.ts` — import from src/ modules instead of local defs
 
-Precedence: `project > global > env (PI_ADVISOR_ALWAYS) > default(false)`.
+**Current state:** `advisor.ts` defines all config functions locally
+(`resolveEffectiveConfig`, `readConfig`, `writeConfig`,
+`validateAdvisorConfig`, `isDisabled`, `isUnconfigured`,
+`envThinkingLevel`, `envTimeoutMs`, `DEFAULT_THINKING`,
+`DEFAULT_TIMEOUT_MS`, `EffectiveAdvisorConfig`). These conflict with the
+src/ module versions.
 
-This is additive — `onDone` and `whenStuck` keep firing independently.
+**Change:** Remove the local definitions. Import from `src/config.mjs`:
+`resolveEffectiveConfig`, `normalizeDiffMode`, `isDisabled as
+_isDisabled`, `isUnconfigured as _isUnconfigured`, `readConfig`,
+`writeConfig`. Keep local wrapper functions `isDisabled(cwd,
+projectTrusted)` and `isUnconfigured(cwd, projectTrusted)` that call
+`resolveEffectiveConfig` first, then pass the result to the imported
+`_isDisabled`/`_isUnconfigured`.
 
-## Design: config
+Also import from the other src/ modules:
+- `buildAdvisorPayload`, `AnyEntry` from `src/context-policy.mjs`
+- `collectChangesFromEvents`, `renderDigest`, `ChangeEvent` from
+  `src/diff.mjs`
+- `getSummary`, `SummaryCache`, `SummarySource` from
+  `src/summarizer.mjs`
+
+### Change 2: `advisor.ts` — add `always` + context fields to AdvisorConfig
+
+Add to the `AdvisorConfig` type:
+`always?: boolean`, `contextMode?: string`, `tailMessages?: number`,
+`stripReasoning?: boolean`, `keepToolResults?: string`,
+`diffMode?: string`, `diffMaxChars?: number`, `summaryModel?: string |
+null`, `summaryMaxTokens?: number`, `summaryRefreshEvery?: number`,
+`summaryTimeoutMs?: number`.
+
+Add a `ContextMode` type: `"full" | "summary+tail" | "tail" | "summary"`.
+
+### Change 3: `advisor.ts` — add compressed system prompt
+
+Add `ADVISOR_SYSTEM_PROMPT_COMPRESSED` — a variant of the existing
+`ADVISOR_SYSTEM_PROMPT` that tells the advisor it's seeing a compressed
+view (summary + tail + diff), not the full transcript, and should not
+assume it sees every tool result.
+
+Add `systemPromptForMode(mode)` → returns `ADVISOR_SYSTEM_PROMPT` for
+`"full"`, `ADVISOR_SYSTEM_PROMPT_COMPRESSED` otherwise.
+
+### Change 4: `advisor.ts` — replace `buildTranscript` with `buildAdvisorPayload` in `runAdvisor`
+
+**Current flow in `runAdvisor`:**
+1. Resolve the advisor model (`resolveAdvisor`)
+2. Call `buildTranscript(ctx.sessionManager.getBranch(), model)` → gets
+   the full transcript as a string
+3. Build a request with `ADVISOR_SYSTEM_PROMPT` and the transcript
+4. Call `complete(model, request, ...)` → get advice
+5. Return `{ text, disabled }`
+
+**New flow:**
+1. Resolve the advisor model (same)
+2. Resolve config with `resolveEffectiveConfig(ctx.cwd,
+   projectTrusted)` to get `contextMode`, `tailMessages`, etc.
+3. Get the summary: call `getSummary(ctx, { summaryModel, entries,
+   stripReasoning, maxTokens: summaryMaxTokens, timeoutMs:
+   summaryTimeoutMs, signal, refreshEvery: summaryRefreshEvery, cache:
+   summaryCache, setCache: (c) => { summaryCache = c } })`. If it
+   returns `{ error }`, pass `null` as the summary (the payload function
+   handles degradation).
+4. Get the diff digest: call `renderDigest(
+   collectChangesFromEvents(changeEvents, ...), [], diffMode,
+   diffMaxChars)`. If empty, pass `undefined`.
+5. Call `buildAdvisorPayload(entries, contextMode, { stripReasoning,
+   keepToolResults, tailMessages, diffDigest, summary }, model)` →
+   gets the payload string
+6. Build the request with `systemPromptForMode(contextMode)` instead of
+   the hardcoded prompt
+7. Call `complete(model, request, ...)` → get advice (same)
+8. Return `{ text, disabled }` (same)
+
+**Key point:** `runAdvisor` is the single insertion point. Both the
+`advisor` tool and `/advise` call it, so changing it here updates all
+paths.
+
+### Change 5: `advisor.ts` — add context-policy closure state
+
+Inside `advisorExtension(pi)`, add:
+- `let changeEvents: ChangeEvent[] = []` — accumulates tool_result
+  events for diff harvest
+- `let summaryCache: SummaryCache | null = null` — rolling summary cache
+
+Reset both to empty/null in the existing `input` event handler (the one
+that resets `stuckErrors`, `loopCount`, etc. on genuine user input).
+
+### Change 6: `advisor.ts` — accumulate change events in `tool_result` handler
+
+In the existing `tool_result` handler, before the stuck/loop logic, push
+change events into `changeEvents`:
+- `event.toolName === "edit"` → push `{ kind: "edit", path, patch,
+  isError, ts }` (patch from `event.details.patch`)
+- `event.toolName === "write"` → push `{ kind: "write", path, content,
+  isError, ts }`
+- `event.toolName === "bash"` → push `{ kind: "bash", command, isError,
+  ts }`
+
+### Change 7: `advisor.ts` — add `always` trigger
+
+Add a **second** `input` event handler (separate from the reset handler).
+It:
+1. Resolves config (`resolveEffectiveConfig`)
+2. Returns early if `!cfg.always` or `autoRunning`
+3. Sets `autoReviewedThisRound = true` (prevents `onDone` from
+   double-firing)
+4. Calls `runAutomaticReview(ctx, (text) => \`A reviewer model assessed
+   the current task before you started:\n\n${text}\n\nAddress any valid
+   issues.\`, "steer")`
+
+This runs **before** the agent processes the user's input, injecting the
+review as a `steer` so it shapes the current turn.
+
+### Change 8: `config.mjs` — verify `always` field is present
+
+Check that `config.mjs` has:
+- `DEFAULTS.always = false`
+- `envAlways()` reading `PI_ADVISOR_ALWAYS`
+- Validation for `always` in `validateAdvisorConfig`
+- `always` in `resolveEffectiveConfig` return (precedence: project >
+  global > env > default)
+- `always` in `writeConfig` merge
+
+If any are missing, add them.
+
+## Config reference
 
 New keys in `advisor.json` (all optional, all backward compatible):
 
@@ -104,81 +257,46 @@ New keys in `advisor.json` (all optional, all backward compatible):
 }
 ```
 
-Set `contextMode: "full"` + `stripReasoning: false` to recover byte-compat
-with upstream (sends the entire conversation with reasoning intact).
+Set `contextMode: "full"` + `stripReasoning: false` to recover
+byte-compat with upstream (sends the entire conversation with reasoning
+intact).
+
+Precedence for all keys: `env > project > global > default`.
 
 ## Tasks
 
-### Monorepo
-
-- [ ] Update root `package.json`:
-  - `name`, `description`, `author`, `repository`, `bugs`, `homepage` →
-    point at `bhubbb/pi-extensions`
-  - `pi.extensions` manifest → declare all 3 entry points:
-    `./packages/pi-advisor/advisor.ts`,
-    `./packages/pi-llama/src/index.ts`,
-    `./packages/pi-omlx/index.ts`
-  - `files` array → the 3 package dirs + README
-- [ ] Update `tsconfig.json` `include` → drop the deleted packages
-- [ ] Update `README.md` → document all 3 packages, attribution to hknet
-- [ ] Update `~/.pi/agent/settings.json`:
-  - Change package path from `/Users/brendanhubble/Development/pi-extensions`
-    to `/Users/brendanhubble/Development/GitHub/pi-extensions`
-  - Remove `git:github.com/bhubbb/pi-llama-mb` (now loaded via monorepo)
-  - Keep `npm:pi-web-access` and others as-is
-- [ ] Verify each package's own `package.json` `pi.extensions` entry point
-  is correct
-
-### pi-advisor
-
-- [ ] **advisor.ts**: replace local config functions with imports from
-  `src/config.mjs` (remove: `DEFAULT_THINKING`, `DEFAULT_TIMEOUT_MS`,
-  `validateAdvisorConfig`, `readConfig`, `writeConfig`,
-  `resolveEffectiveConfig`, `envThinkingLevel`, `envTimeoutMs`,
-  `EffectiveAdvisorConfig`)
-- [ ] **advisor.ts**: add imports of `buildAdvisorPayload`,
-  `collectChangesFromEvents`, `renderDigest`, `getSummary`,
-  `SummaryCache`, `ChangeEvent` from the src/ modules
-- [ ] **advisor.ts**: add `always` + context policy fields to
-  `AdvisorConfig` type
+- [ ] **advisor.ts**: remove local config defs, import from
+  `src/config.mjs` (rename imports to `_isDisabled`/`_isUnconfigured`,
+  keep wrappers)
+- [ ] **advisor.ts**: import `buildAdvisorPayload`, `AnyEntry`,
+  `collectChangesFromEvents`, `renderDigest`, `ChangeEvent`,
+  `getSummary`, `SummaryCache`, `SummarySource`
+- [ ] **advisor.ts**: add `always` + context fields to `AdvisorConfig`
+  type
 - [ ] **advisor.ts**: add `ContextMode` type
 - [ ] **advisor.ts**: add `ADVISOR_SYSTEM_PROMPT_COMPRESSED` +
   `systemPromptForMode()`
-- [ ] **advisor.ts**: replace `buildTranscript` call in `runAdvisor` with
-  `buildAdvisorPayload` using the resolved config
-- [ ] **advisor.ts**: add context-policy closure state (`changeEvents`,
-  `summaryCache`) and reset on `input`
+- [ ] **advisor.ts**: add `changeEvents` + `summaryCache` closure state,
+  reset in existing `input` handler
 - [ ] **advisor.ts**: accumulate change events in `tool_result` handler
-- [ ] **advisor.ts**: add `always` trigger in `input` event handler
-- [ ] **advisor.ts**: wrapper `isDisabled`/`isUnconfigured` that resolve
-  config then call the imported versions
-- [ ] **config.mjs**: add `always` to `DEFAULTS`, `envAlways()`,
-  `validateAdvisorConfig`, `resolveEffectiveConfig`, `writeConfig`
-- [ ] Fix the 7 failing tests (test expectations vs recovered module
-  output — e.g. `renderEntry` needs `showToolResults` opt, selectTail
-  edge cases, digest truncation)
-- [ ] Update `packages/pi-advisor/package.json` (`name` →
-  `@bhubbb/pi-advisor`, `files` → include `src/`)
-
-### Verification
-
-- [ ] `npm run typecheck` passes (only expected `.mjs` declaration
-  warnings remain)
+- [ ] **advisor.ts**: add second `input` handler for `always` trigger
+- [ ] **advisor.ts**: replace `buildTranscript` with
+  `buildAdvisorPayload` in `runAdvisor` (summary pre-call + diff digest
+  + `systemPromptForMode`)
+- [ ] **config.mjs**: verify `always` field is present in DEFAULTS,
+  envAlways, validation, resolution, writeConfig
+- [ ] **package.json** (pi-advisor): update `name` to
+  `@bhubbb/pi-advisor`, `files` to include `src/`
+- [ ] Fix failing tests (test expectations vs module output —
+  `renderEntry` needs `showToolResults` opt, selectTail edge cases,
+  digest truncation)
+- [ ] `npm run typecheck` passes
 - [ ] `node --test packages/pi-advisor/tests/*.test.mjs` — all pass
-- [ ] `pi reload` loads all 3 extensions without errors
-- [ ] `pi --list-models` shows llama-cpp models (offline fallback works)
-- [ ] `/advisor status` shows resolved config including `always`
+- [ ] `pi reload` loads without errors, `/advisor status` shows `always`
 - [ ] `/advise` runs and uses `summary+tail` payload by default
-
-### Commit + push
-
-- [ ] One commit for the monorepo consolidation (packages moved, manifest,
-  settings, README)
-- [ ] One commit for the pi-advisor context policy + always trigger
-- [ ] Push to `bhubbb/pi-extensions`
+- [ ] Commit + push to `bhubbb/pi-extensions`
 
 ## Attribution
 
-`pi-advisor` is a fork of `hknet/pi-extensions` (EUPL-1.2). Attribution in
-README + LICENSE. The upstream `advisor` tool, auto-triggers, and
-`/advise` UX are preserved.
+`pi-advisor` is a fork of `hknet/pi-extensions` (EUPL-1.2). The upstream
+`advisor` tool, auto-triggers, and `/advise` UX are preserved.

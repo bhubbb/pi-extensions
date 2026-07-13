@@ -50,6 +50,7 @@ This adds the package source to your pi settings (`~/.pi/agent/settings.json` un
   "summaryModel": "provider/id",
   "thinking": "high",
   "onDone": true,
+  "onTodoDone": false,
   "always": true,
   "whenStuck": 3,
   "timeoutMs": 120000,

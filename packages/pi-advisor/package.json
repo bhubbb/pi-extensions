@@ -1,6 +1,6 @@
 {
-  "name": "@hk_net/pi-advisor",
-  "version": "0.1.3",
+  "name": "@bhubbb/pi-advisor",
+  "version": "1.0.0",
   "description": "Pi advisor extension: consult a configured reviewer model on the full conversation transcript",
   "type": "module",
   "private": false,
@@ -11,7 +11,7 @@
     "advisor"
   ],
   "license": "EUPL-1.2",
-  "author": "hknet",
+  "author": "hknet (fork: bhubbb)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hknet/pi-extensions.git",
@@ -23,6 +23,8 @@
   "homepage": "https://github.com/hknet/pi-extensions/tree/main/packages/pi-advisor#readme",
   "files": [
     "advisor.ts",
+    "src/",
+    "tests/",
     "README.md",
     "CHANGELOG.md"
   ],

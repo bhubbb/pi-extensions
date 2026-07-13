@@ -67,8 +67,9 @@ JSON, resolved **project-over-global** (first scope that defines a key wins):
 {
   "model":     "openai-codex/gpt-5.5",      // "provider/id", or "none" to disable + hide the tool
   "thinking":  "high",                      // off|minimal|low|medium|high|xhigh (default high)
-  "onDone":    false,                       // auto-review when the agent finishes a task
-  "whenStuck": 0,                           // auto-consult after N consecutive errors or N repeated identical tool calls (0 = off)
+  "onDone":      false,                     // auto-review when the agent finishes a task
+  "onTodoDone":  false,                     // auto-review when the agent completes a todo
+  "whenStuck":   0,                         // auto-consult after N consecutive errors or N repeated identical tool calls (0 = off)
   "timeoutMs": 120000                       // advisor call timeout in ms (0 = use provider default)
 }
 ```
@@ -96,6 +97,7 @@ are selectable.
 | `/advisor none` | Disable advisor for a scope → choose scope |
 | `/advisor default` | Clear a scope; if no env/lower-scope model remains, advisor becomes not configured |
 | `/advisor on-done on\|off` | Toggle auto-review-on-finish → choose scope |
+| `/advisor on-todo on\|off` | Toggle auto-review on todo completion → choose scope |
 | `/advisor when-stuck off\|<N>` | Trigger advisor on N consecutive errors or N repeated identical tool calls → choose scope |
 | `/advisor status` | Show the resolved configuration |
 | `/advise [show\|pipe\|steer]` | Run a one-off review now; default is `pipe` when idle and `steer` while the agent is running |
@@ -118,6 +120,11 @@ tool's `promptGuidelines`. Two opt-in deterministic triggers, configurable per p
 
 - **`onDone`** — on `agent_end`, auto-review and steer one follow-up so the agent addresses any
   issues before truly stopping (guarded to at most once per user prompt).
+- **`onTodoDone`** — on `tool_result` when the agent completes a todo (detects both the rich
+  `update`/`status: "completed"` and example `toggle`/`done: true` tool shapes), auto-consult
+  the reviewer and inject the advice as a steering message. Requires a `todo` tool to be loaded
+  in the session and a reviewer model configured; fires independently of `onDone` and does not
+  suppress the final `onDone` review.
 - **`whenStuck: N`** — after N consecutive tool errors **or** N repeated identical tool calls
   (same tool name + same arguments), auto-consult the reviewer and inject the advice as a
   steering message to get unstuck.
@@ -130,8 +137,8 @@ tool's `promptGuidelines`. Two opt-in deterministic triggers, configurable per p
 - **Project config follows pi project trust.** A global install ignores `<cwd>/.pi/advisor.json`
   while the current project is untrusted, so an untrusted checkout cannot silently choose a reviewer
   model or enable auto-triggers.
-- **Auto-triggers are off by default.** The `onDone` and `whenStuck` features must be explicitly
-  enabled in configuration, and they do nothing unless a reviewer model is configured.
+- **Auto-triggers are off by default.** The `onDone`, `onTodoDone`, and `whenStuck` features must
+  be explicitly enabled in configuration, and they do nothing unless a reviewer model is configured.
 - **Data sent to the reviewer model.** When `advisor` is called, the extension sends the full
   active conversation branch to the configured reviewer model via the provider's API. This
   includes:
