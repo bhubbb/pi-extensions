@@ -1,0 +1,17 @@
+{
+  "name": "pi-llama-stats",
+  "version": "0.1.0",
+  "description": "llama.cpp server stats overlay view for pi (companion to pi-llama)",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "llama.cpp"],
+  "license": "MIT",
+  "pi": { "extensions": ["./src/index.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true }
+  }
+}
