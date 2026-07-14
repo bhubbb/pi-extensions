@@ -281,27 +281,42 @@ export async function fetchBackendStats(
     fetchJson<{ status?: string; error?: string }>(root + "/health", safeSignal, {}, fetchFn),
   ]);
 
+  // Check reachability FIRST (before parsing):
+  // - /v1/models failure means the backend is effectively unreachable for the
+  //   stats view — we can't show any model data, so don't pretend it's alive.
+  // - /health failure is the canonical liveness signal — the server isn't
+  //   responding reliably.
+  // - /props failure is tolerated (just means no build info) — other endpoints
+  //   can still provide the data the view needs.
+  const propsOk = propsRaw.status === "fulfilled" && propsRaw.value !== undefined;
+  const modelsOk = modelsRaw.status === "fulfilled" && modelsRaw.value !== undefined;
+  const healthOk = healthRaw.status === "fulfilled" && healthRaw.value !== undefined;
+  const isUnreachable = !modelsOk || !healthOk;
+
   // Parse models first — needed to know which models to fetch slots for.
   const models = modelsRaw.status === "fulfilled" ? parseModels(modelsRaw.value) : undefined;
   const props = propsRaw.status === "fulfilled" && propsRaw.value ? parseProps(propsRaw.value) : undefined;
 
   // Parse health.
-  const healthOk = healthRaw.status === "fulfilled" && healthRaw.value;
-  const health = healthOk
+  const health = healthOk && healthRaw.value
     ? { status: (healthRaw.value.status ?? healthRaw.value.error ?? "unknown") as string }
     : undefined;
 
-  // Check reachability: both /props and /health failed.
-  const propsOk = propsRaw.status === "fulfilled" && propsRaw.value !== undefined;
-  const isUnreachable = !propsOk && !healthOk;
-
   let error: string | undefined;
   if (isUnreachable) {
-    const firstRejection = [propsRaw, healthRaw].find((r) => r.status === "rejected");
-    if (firstRejection?.status === "rejected" && firstRejection.reason?.message) {
-      error = firstRejection.reason.message;
+    // Prefer /health error message since it's the primary unreachable signal.
+    const healthRejection = healthRaw.status === "rejected" ? healthRaw : null;
+    if (healthRejection?.reason?.message) {
+      error = healthRejection.reason.message;
     } else {
-      error = "unreachable";
+      const firstRejection = [propsRaw, modelsRaw, healthRaw].find(
+        (r) => r.status === "rejected",
+      );
+      if (firstRejection?.status === "rejected" && firstRejection.reason?.message) {
+        error = firstRejection.reason.message;
+      } else {
+        error = "unreachable";
+      }
     }
   }
 

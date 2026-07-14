@@ -434,16 +434,73 @@ describe("fetchBackendStats — resilience", () => {
     expect(result.health).toBeUndefined();
   });
 
-  it("does not set error when only /v1/models fails", async () => {
+  it("sets error when /health fails even if /props and /v1/models succeed", async () => {
+    // /health failure is the canonical unreachable signal.
+    const fetchFn = mockFetch({
+      "/props": { status: 200, json: { build_info: "b1" } },
+      "/v1/models": { status: 200, json: { data: [{ id: "m", status: "loaded" }] } },
+    });
+    // /health not in map → 404 → treated as failed.
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.error).toBeDefined();
+    expect(result.health).toBeUndefined();
+  });
+
+  it("sets error when /health succeeds but /props AND /v1/models both fail", async () => {
+    // If we can't get any data from the backend (only health works), it's
+    // effectively unreachable for the stats view's purposes.
+    const fetchFn = mockFetch({
+      "/health": { status: 200, json: { status: "ok" } },
+    });
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.error).toBeDefined();
+  });
+
+  it("does NOT set error when all three core endpoints succeed (baseline)", async () => {
+    // Baseline check: when /props, /v1/models, and /health all succeed,
+    // the backend is reachable and no error is set.
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
+      "/v1/models": { status: 200, json: { data: [] } },
+      "/health": { status: 200, json: { status: "ok" } },
+    });
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.error).toBeUndefined();
+    expect(result.health).toEqual({ status: "ok" });
+  });
+
+  it("sets error when /v1/models fails (even if /props and /health succeed)", async () => {
+    // /v1/models is the root models endpoint — if it fails, the stats view
+    // can't show any model data, so treat the backend as unreachable rather
+    // than rendering an empty block.
+    const fetchFn = mockFetch({
+      "/props": { status: 200, json: { build_info: "b1" } },
       "/health": { status: 200, json: { status: "ok" } },
     });
     // /v1/models not in map → 404
 
     const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.error).toBeDefined();
+    expect(result.health).toEqual({ status: "ok" }); // /health still parsed
+    expect(result.props).toBeDefined();
+  });
+
+  it("does not set error when /props fails but /v1/models and /health succeed", async () => {
+    // /props failure is tolerated — the other endpoints can still provide
+    // the data the view needs (just no build info).
+    const fetchFn = mockFetch({
+      "/v1/models": { status: 200, json: { data: [{ id: "m", status: "loaded" }] } },
+      "/health": { status: 200, json: { status: "ok" } },
+    });
+    // /props not in map → 404
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
     expect(result.error).toBeUndefined();
-    expect(result.models).toEqual([]); // parseModels returns [] on failure
+    expect(result.models).toHaveLength(1);
+    expect(result.health).toEqual({ status: "ok" });
   });
 
   it("respects abort signal", async () => {

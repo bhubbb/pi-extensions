@@ -597,4 +597,126 @@ describe("StatsView rendering", () => {
 
     view.dispose();
   });
+
+  it("renders cache value when nPromptTokensCache > 0", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [{
+          id: 0,
+          isProcessing: true,
+          nCtx: 131072,
+          nPromptTokens: 106376,
+          nPromptTokensProcessed: 1684, // < total → prompt processing
+          nPromptTokensCache: 104692,   // cache hit
+          nDecoded: 0,
+        }],
+      },
+    }];
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Cache value must be rendered.
+    expect(fullText).toContain("cache 104692");
+
+    // Prompt progress should also be shown (sanity check).
+    expect(fullText).toMatch(/prompt 1684\/106376 \(\d+%\)/);
+
+    view.dispose();
+  });
+
+  it("does not crash when nPromptTokens is 0 (boundary case)", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [{
+          id: 0,
+          isProcessing: true,
+          nCtx: 8192,
+          nPromptTokens: 0,            // edge case: total is 0
+          nPromptTokensProcessed: 0,
+          nDecoded: 0,
+        }],
+      },
+    }];
+
+    // Should not crash, should not produce Infinity% or NaN%.
+    let lines: string[];
+    expect(() => { lines = view.render(120); }).not.toThrow();
+    const fullText = lines!.join("\n");
+
+    // No Infinity% or NaN% in output.
+    expect(fullText).not.toContain("Infinity%");
+    expect(fullText).not.toContain("NaN%");
+
+    // Since nPromptTokens === 0, isPromptProcessing is false (guard added),
+    // so the slot shows "busy" (from isProcessing=true) but no prompt progress.
+    expect(fullText).toContain("[warning]busy[/]");
+
+    view.dispose();
+  });
+
+  it("renders backend unreachable when /v1/models fails", async () => {
+    // /v1/models failing should mark the backend unreachable (the user can't
+    // see any models otherwise and it looks like an empty backend rather than
+    // a failure).
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [], // /v1/models returns empty (or 404)
+      slots: {},
+      health: { status: "ok" },
+    });
+    // Override /v1/models to return 500.
+    // @ts-ignore
+    globalThis.fetch = async (url, _init) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      const parsed = new URL(urlString);
+      if (parsed.pathname === "/v1/models") {
+        return new Response("Internal Server Error", { status: 500 });
+      }
+      if (parsed.pathname === "/props") return new Response(JSON.stringify({}), { status: 200 });
+      if (parsed.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      return new Response("Not Found", { status: 404 });
+    };
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Should show unreachable state.
+    expect(fullText).toContain("unreachable");
+    expect(fullText).toContain("[error]");
+
+    view.dispose();
+  });
 });

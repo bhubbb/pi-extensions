@@ -204,6 +204,7 @@ export class StatsView implements Component {
     // - Idle: nothing happening
     const isPromptProcessing = slot.nPromptTokens !== undefined
       && slot.nPromptTokensProcessed !== undefined
+      && slot.nPromptTokens > 0
       && slot.nPromptTokensProcessed < slot.nPromptTokens;
     const isInferencing = slot.nDecoded !== undefined && slot.nDecoded > 0
       && (slot.nRemain === undefined || slot.nRemain > 0);
@@ -223,7 +224,8 @@ export class StatsView implements Component {
     if (isPromptProcessing && slot.nPromptTokens !== undefined && slot.nPromptTokensProcessed !== undefined) {
       const processed = slot.nPromptTokensProcessed;
       const total = slot.nPromptTokens;
-      const pct = Math.floor((processed / total) * 100);
+      // Guard against division by zero (empty prompt or malformed response).
+      const pct = total > 0 ? Math.floor((processed / total) * 100) : 0;
       parts.push(`prompt ${processed}/${total} (${pct}%)`);
     }
     // Cache hit info (shown when prompt has cached tokens).
