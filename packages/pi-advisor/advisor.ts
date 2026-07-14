@@ -299,6 +299,14 @@ Give direct, high-signal advice. Specifically:
   (edge) cases, AND every test exercises real behavior. Tests that
   restate the implementation, probe trivia, or would still pass against
   broken code are not tests; flag them and request revision.
+- When the work involves tests, treat hermeticity as a hard requirement.
+  Tests must never read, write, modify, or delete real user files
+  (configs, dotfiles, databases, caches, keychains, network resources).
+  Use temp dirs, fixtures, in-memory fakes, or dependency injection.
+  A teardown that "cleans up" a touched real file is not a fix — it is
+  a foot-gun that destroys user state if cleanup fails, is skipped, or
+  misses an error branch. Flag any test that touches real files and
+  request revision.
 - Prefer concrete next actions over generic best-practice lectures. Cite specific
   files, functions, or transcript moments.
 
