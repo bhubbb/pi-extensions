@@ -312,8 +312,8 @@ describe("StatsView rendering", () => {
     expect(fullText).toContain("#1");
     expect(fullText).toContain("[muted]○ idle[/]");
     expect(fullText).toContain("[warning]● busy[/]");
-    // Context window formatted as human-readable.
-    expect(fullText).toContain("ctx 8k");
+    // Context window formatted as human-readable (uppercase K).
+    expect(fullText).toContain("ctx 8K");
 
     view.dispose();
   });
@@ -642,8 +642,8 @@ describe("StatsView rendering", () => {
 
     // Prompt progress should also be shown (sanity check).
     expect(fullText).toContain("1,684 / 106,376 tokens");
-    // Context window formatted as human-readable (131072 → 128k).
-    expect(fullText).toContain("ctx 128k");
+    // Context window formatted as human-readable (131072 → 128K, uppercase K).
+    expect(fullText).toContain("ctx 128K");
 
     view.dispose();
   });
@@ -769,6 +769,92 @@ describe("StatsView rendering", () => {
     expect(fullText).toMatch(/\d+\.\d+ GB/);
     // Large context formatted as M.
     expect(fullText).toContain("ctx 1.0M");
+
+    view.dispose();
+  });
+
+  it("keeps idle slots on a single line (compact layout)", async () => {
+    // Active slots expand to 2 lines for progress details, but idle slots
+    // should remain compact to preserve vertical space.
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [
+          { id: 0, isProcessing: false, nCtx: 8192 },
+          { id: 1, isProcessing: false, nCtx: 8192 },
+          { id: 2, isProcessing: false, nCtx: 8192 },
+          { id: 3, isProcessing: false, nCtx: 8192 },
+        ],
+      },
+    }];
+
+    const lines = view.render(120);
+
+    // Count slot lines (lines starting with ○ idle).
+    const slotLines = lines.filter((l) => l.includes("○ idle"));
+    // Each idle slot should be exactly ONE line (no expansion).
+    expect(slotLines.length).toBe(4);
+    // No progress bar characters (░) should appear for idle slots.
+    expect(lines.some((l) => l.includes("░"))).toBe(false);
+    // No 'decoded' or 'remaining' detail lines.
+    expect(lines.some((l) => l.includes("decoded"))).toBe(false);
+    expect(lines.some((l) => l.includes("remaining"))).toBe(false);
+
+    view.dispose();
+  });
+
+  it("expands active slots to 2 lines for progress details", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [
+          {
+            id: 0,
+            isProcessing: true,
+            nCtx: 8192,
+            nPromptTokens: 1000,
+            nPromptTokensProcessed: 500,
+          },
+        ],
+      },
+    }];
+
+    const lines = view.render(120);
+
+    // Find the active slot lines.
+    const activeHeaderIdx = lines.findIndex((l) => l.includes("◐ processing prompt"));
+    expect(activeHeaderIdx).toBeGreaterThanOrEqual(0);
+
+    // The line right after the header should be the progress detail line.
+    const detailLine = lines[activeHeaderIdx + 1];
+    expect(detailLine).toBeDefined();
+    expect(detailLine).toContain("█"); // Progress bar (filled blocks)
+    expect(detailLine).toContain("░"); // Progress bar (empty blocks)
+    expect(detailLine).toContain("500 / 1,000 tokens");
 
     view.dispose();
   });

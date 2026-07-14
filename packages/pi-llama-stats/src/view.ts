@@ -258,10 +258,13 @@ export class StatsView implements Component {
       ];
       // Add cache info if available.
       if (slot.nPromptTokensCache !== undefined && slot.nPromptTokensCache > 0) {
-        const cacheTotal = total;
-        const cachePct = cacheTotal > 0 ? (slot.nPromptTokensCache / cacheTotal) * 100 : 0;
+        const cache = slot.nPromptTokensCache;
+        // Cache hit rate = cache / (cache + processed).
+        // Guard against zero denominator to avoid NaN%.
+        const denom = cache + processed;
+        const cachePct = denom > 0 ? (cache / denom) * 100 : 0;
         detailParts.push(
-          this.theme.fg("success", `cache: ${this.formatNumber(slot.nPromptTokensCache)} (${cachePct.toFixed(1)}%)`),
+          this.theme.fg("success", `cache: ${this.formatNumber(cache)} (${cachePct.toFixed(1)}%)`),
         );
       }
       const detailLine = `${prefix}  ${bar}  ${detailParts.join("  ")}`;
@@ -292,10 +295,10 @@ export class StatsView implements Component {
     return "█".repeat(filled) + "░".repeat(empty);
   }
 
-  /** Format a context window size in human-readable form (e.g. 131072 → "131k"). */
+  /** Format a context window size in human-readable form (e.g. 131072 → "128K"). */
   private formatContextWindow(n: number): string {
     if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)}M`;
-    if (n >= 1024) return `${Math.round(n / 1024)}k`;
+    if (n >= 1024) return `${Math.round(n / 1024)}K`;
     return String(n);
   }
 
