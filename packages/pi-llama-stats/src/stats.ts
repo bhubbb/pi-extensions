@@ -1,6 +1,10 @@
 /**
  * Fetch and parse llama.cpp server stats endpoints.
  *
+ * Targets the **llama-app router** API (role: "router", models_autoload: true)
+ * which requires `?model=<id>` on /slots. Falls back gracefully to classic
+ * llama.cpp server endpoints.
+ *
  * Strictly decoupled from UI logic — all errors are returned as data, never thrown.
  * Accepts an optional `fetch` override for testing.
  */
@@ -15,18 +19,16 @@ import { authHeaders } from "./config";
 export interface BackendStats {
   /** The backend this data belongs to. */
   backend: StatsBackend;
-  /** Error message if the backend is unreachable (set when /props, /slots, and /health all fail). */
+  /** Error message if the backend is unreachable (set when /props and /health both fail). */
   error?: string;
   /** Parsed /props data. */
   props?: PropsStats;
-  /** Parsed /slots data. */
-  slots?: SlotStats[];
+  /** Per-model slots, keyed by model id (from /slots?model=<id>). */
+  modelSlots?: Record<string, SlotStats[]>;
   /** Parsed /v1/models data. */
   models?: ModelStats[];
   /** Parsed /health data. */
   health?: { status: string };
-  /** Parsed /metrics data (only present if the server has --metrics enabled). */
-  metrics?: MetricsStats;
   /** Timestamp (ms) when this data was fetched. */
   fetchedAt: number;
 }
@@ -38,20 +40,25 @@ export interface PropsStats {
   totalSlots?: number;
   isSleeping?: boolean;
   nCtx?: number;
+  /** Router-level role (e.g. "router", "server"). */
+  role?: string;
 }
 
-/** Per-slot status from /slots. */
+/** Per-slot status from /slots?model=<id>. */
 export interface SlotStats {
   id: number;
   isProcessing: boolean;
   nCtx?: number;
   speculative?: boolean;
+  // next_token is an array [{ n_decoded, n_remain, ... }] on the router API.
   nDecoded?: number;
   nRemain?: number;
-  nPast?: number;
-  nTokens?: number;
-  truncated?: boolean;
-  model?: string;
+  hasNextToken?: boolean;
+  // Prompt token counts from params object.
+  nPromptTokens?: number;
+  nPromptTokensProcessed?: number;
+  nPromptTokensCache?: number;
+  // Timing fields — present in some builds, absent in others (defensive).
   predictedPerSecond?: number;
   promptPerSecond?: number;
 }
@@ -63,16 +70,8 @@ export interface ModelStats {
   nParams?: number;
   size?: number;
   nCtxTrain?: number;
-}
-
-/** Parsed Prometheus metrics from /metrics. */
-export interface MetricsStats {
-  promptTokensPerSecond?: number;
-  predictedTokensPerSecond?: number;
-  requestsProcessing?: number;
-  requestsDeferred?: number;
-  promptTokensTotal?: number;
-  tokensPredictedTotal?: number;
+  nCtx?: number;
+  architecture?: { input_modalities?: string[]; output_modalities?: string[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -121,38 +120,6 @@ async function fetchJson<T>(
   }
 }
 
-/**
- * Fetch a text endpoint with a timeout and abort signal.
- * Returns `undefined` on any error.
- */
-async function fetchText(
-  url: string,
-  signal: AbortSignal,
-  headers: Record<string, string>,
-  fetchFn: typeof fetch = fetch,
-): Promise<string | undefined> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-    const combined = typeof AbortSignal.any === "function"
-      ? AbortSignal.any([signal, controller.signal])
-      : signal;
-
-    const res = await fetchFn(url, {
-      headers,
-      signal: combined,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!res.ok) return undefined;
-    return await res.text();
-  } catch {
-    return undefined;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------------------
@@ -171,32 +138,60 @@ function parseProps(raw: unknown): PropsStats | undefined {
       typeof obj["default_generation_settings"] === "object"
         ? (Number((obj["default_generation_settings"] as Record<string, unknown>)["n_ctx"]) || undefined)
         : undefined,
+    role: typeof obj["role"] === "string" ? obj["role"] : undefined,
   };
 }
 
-/** Parse raw /slots array into SlotStats[]. */
-function parseSlots(raw: unknown): SlotStats[] {
+/** Parse raw /slots array into SlotStats[]. Handles `next_token` as array (router) or object (classic). */
+function parseSlots(raw: unknown, _modelId?: string): SlotStats[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((slot): SlotStats => {
     if (!slot || typeof slot !== "object") {
       return { id: -1, isProcessing: false };
     }
     const s = slot as Record<string, unknown>;
+
+    // next_token is an array [{ n_decoded, n_remain, ... }] on the router API,
+    // or a plain object on the classic API. Handle both defensively.
+    let nDecoded: number | undefined;
+    let nRemain: number | undefined;
+    let hasNextToken: boolean | undefined;
+
+    const nextToken = s["next_token"];
+    if (Array.isArray(nextToken) && nextToken.length > 0) {
+      // Router API: array of per-token snapshots.
+      const first = nextToken[0] as Record<string, unknown> | undefined;
+      nDecoded = Number(first?.["n_decoded"]) || undefined;
+      nRemain = Number(first?.["n_remain"]) || undefined;
+      hasNextToken = !!first?.["has_next_token"];
+    } else if (nextToken && typeof nextToken === "object") {
+      // Classic API: plain object.
+      nDecoded = Number((nextToken as Record<string, unknown>)["n_decoded"]) || undefined;
+      nRemain = Number((nextToken as Record<string, unknown>)["n_remain"]) || undefined;
+    }
+
+    // Prompt token counts from params object (present in router builds).
+    const params = s["params"] && typeof s["params"] === "object"
+      ? s["params"] as Record<string, unknown>
+      : null;
+
+    // Timing — defensive (present in some builds, absent in others).
     const timing =
       s["timing"] && typeof s["timing"] === "object"
         ? s["timing"] as Record<string, unknown>
         : null;
+
     return {
       id: Number(s["id"]) ?? -1,
       isProcessing: !!s["is_processing"],
       nCtx: Number(s["n_ctx"]) || undefined,
       speculative: !!s["speculative"],
-      nDecoded: Number(s["next_token"] && (s["next_token"] as Record<string, unknown>)["n_decoded"]) || undefined,
-      nRemain: Number(s["next_token"] && (s["next_token"] as Record<string, unknown>)["n_remain"]) || undefined,
-      nPast: Number(s["n_past"]) || undefined,
-      nTokens: Number(s["n_tokens"]) || undefined,
-      truncated: !!s["truncated"],
-      model: typeof s["model"] === "string" ? s["model"] : undefined,
+      nDecoded,
+      nRemain,
+      hasNextToken,
+      nPromptTokens: Number(params?.["n_prompt_tokens"]) || undefined,
+      nPromptTokensProcessed: Number(params?.["n_prompt_tokens_processed"]) || undefined,
+      nPromptTokensCache: Number(params?.["n_prompt_tokens_cache"]) || undefined,
       predictedPerSecond: Number(timing?.["predicted_per_second"]) || undefined,
       promptPerSecond: Number(timing?.["prompt_per_second"]) || undefined,
     };
@@ -224,48 +219,27 @@ function parseModels(raw: unknown): ModelStats[] {
         : typeof statusObj === "string"
           ? statusObj
           : undefined;
+
+    // Architecture info from meta (optional).
+    let architecture: { input_modalities?: string[]; output_modalities?: string[] } | undefined;
+    if (meta?.["architecture"] && typeof meta["architecture"] === "object") {
+      const arch = meta["architecture"] as Record<string, unknown>;
+      architecture = {
+        input_modalities: Array.isArray(arch["input_modalities"]) ? arch["input_modalities"] as string[] : undefined,
+        output_modalities: Array.isArray(arch["output_modalities"]) ? arch["output_modalities"] as string[] : undefined,
+      };
+    }
+
     return {
       id: typeof o["id"] === "string" ? o["id"] : "",
       status,
       nParams: Number(meta?.["n_params"]) || undefined,
       size: Number(meta?.["size"]) || undefined,
       nCtxTrain: Number(meta?.["n_ctx_train"]) || undefined,
+      nCtx: Number(meta?.["n_ctx"]) || undefined,
+      architecture,
     };
   });
-}
-
-/**
- * Parse Prometheus text format from /metrics.
- *
- * Lines look like: `llamacpp:predicted_tokens_seconds 52.94`
- * Extracts the first match per named gauge/counter.
- */
-export function parseMetricsText(text: string): MetricsStats {
-  const result: MetricsStats = {};
-  const lines = text.split("\n");
-
-  const metricMap: Record<string, keyof MetricsStats> = {
-    "llamacpp:prompt_tokens_seconds": "promptTokensPerSecond",
-    "llamacpp:predicted_tokens_seconds": "predictedTokensPerSecond",
-    "llamacpp:requests_processing": "requestsProcessing",
-    "llamacpp:requests_deferred": "requestsDeferred",
-    "llamacpp:prompt_tokens_total": "promptTokensTotal",
-    "llamacpp:tokens_predicted_total": "tokensPredictedTotal",
-  };
-
-  for (const line of lines) {
-    for (const [name, key] of Object.entries(metricMap)) {
-      if (line.startsWith(name + " ")) {
-        const value = parseFloat(line.slice(name.length + 1));
-        if (!isNaN(value)) {
-          result[key] = value;
-        }
-        break; // One metric per line — move to next line
-      }
-    }
-  }
-
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,11 +247,17 @@ export function parseMetricsText(text: string): MetricsStats {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch all stats for a single backend in parallel.
+ * Fetch all stats for a single backend.
  *
- * Uses `Promise.allSettled` so a single endpoint failure (e.g. /metrics 501)
- * does not block the others. Sets `error` only if /props, /slots, and /health
- * all fail (treat as unreachable).
+ * For llama-app router:
+ *   1. Fetch /health, /props, /v1/models (no model param needed).
+ *   2. For each loaded/loading model, fetch /slots?model=<id>.
+ *
+ * For classic llama.cpp server:
+ *   1. Fetch /health, /props, /v1/models, /slots (no model param).
+ *
+ * Uses `Promise.allSettled` for core endpoints so a single failure doesn't block
+ * the others. Per-model slots failures are caught individually.
  *
  * @param signal - Parent abort signal (from the view's AbortController). Passed
  *                 through to all sub-fetches so closing the view aborts everything.
@@ -294,30 +274,30 @@ export async function fetchBackendStats(
   // Create a no-op signal if none provided (ensures fetchJson always has one).
   const safeSignal = signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS);
 
-  // Fetch all endpoints in parallel.
-  const [propsRaw, slotsRaw, modelsRaw, healthRaw, metricsRaw] = await Promise.allSettled([
+  // Step 1: Fetch endpoints that don't require a model param.
+  const [propsRaw, modelsRaw, healthRaw] = await Promise.allSettled([
     fetchJson(root + "/props", safeSignal, headers, fetchFn),
-    fetchJson(root + "/slots", safeSignal, headers, fetchFn),
     fetchJson<{ data?: unknown[] }>(root + "/v1/models", safeSignal, headers, fetchFn),
-    fetchJson<{ status?: string; error?: string }>(root + "/health", safeSignal, {}, fetchFn), // /health is public (no auth)
-    fetchText(root + "/metrics", safeSignal, headers, fetchFn),
+    fetchJson<{ status?: string; error?: string }>(root + "/health", safeSignal, {}, fetchFn),
   ]);
 
-  // Check which core endpoints failed.
+  // Parse models first — needed to know which models to fetch slots for.
+  const models = modelsRaw.status === "fulfilled" ? parseModels(modelsRaw.value) : undefined;
+  const props = propsRaw.status === "fulfilled" && propsRaw.value ? parseProps(propsRaw.value) : undefined;
+
+  // Parse health.
+  const healthOk = healthRaw.status === "fulfilled" && healthRaw.value;
+  const health = healthOk
+    ? { status: (healthRaw.value.status ?? healthRaw.value.error ?? "unknown") as string }
+    : undefined;
+
+  // Check reachability: both /props and /health failed.
   const propsOk = propsRaw.status === "fulfilled" && propsRaw.value !== undefined;
-  const slotsOk = slotsRaw.status === "fulfilled" && slotsRaw.value !== undefined;
-  const healthOk = healthRaw.status === "fulfilled" && healthRaw.value !== undefined;
+  const isUnreachable = !propsOk && !healthOk;
 
-  // Determine unreachable status: all three core endpoints failed.
-  const isUnreachable = !propsOk && !slotsOk && !healthOk;
-
-  // Build error message if unreachable.
   let error: string | undefined;
   if (isUnreachable) {
-    // Try to extract a meaningful error from the first rejected promise.
-    const firstRejection = [propsRaw, slotsRaw, healthRaw].find(
-      (r) => r.status === "rejected",
-    );
+    const firstRejection = [propsRaw, healthRaw].find((r) => r.status === "rejected");
     if (firstRejection?.status === "rejected" && firstRejection.reason?.message) {
       error = firstRejection.reason.message;
     } else {
@@ -325,29 +305,50 @@ export async function fetchBackendStats(
     }
   }
 
-  // Parse successfully fetched data.
-  const props = propsOk ? parseProps(propsRaw.value) : undefined;
-  const slots = slotsOk ? parseSlots(slotsRaw.value) : undefined;
-  const models = modelsRaw.status === "fulfilled" ? parseModels(modelsRaw.value) : undefined;
-  const health =
-    healthOk && healthRaw.value
-      ? { status: (healthRaw.value.status ?? healthRaw.value.error ?? "unknown") as string }
-      : undefined;
+  // Step 2: For each active model, fetch /slots?model=<id>.
+  // Fetch slots for any model that isn't explicitly "unloaded" — the router
+  // may use statuses like "loaded", "loading", "ready", "sleeping", etc.
+  // Each per-model fetch is wrapped in .catch() so a single failure doesn't
+  // discard data for other models.
+  const activeModels = models?.filter(
+    (m) => m.status !== "unloaded",
+  ) ?? [];
 
-  // Parse metrics (text format) only if fetch succeeded and returned content.
-  let metrics: MetricsStats | undefined;
-  if (metricsRaw.status === "fulfilled" && metricsRaw.value) {
-    metrics = parseMetricsText(metricsRaw.value);
+  const modelSlotsArr = await Promise.all(
+    activeModels.map((m) =>
+      fetchJson(root + `/slots?model=${encodeURIComponent(m.id)}`, safeSignal, headers, fetchFn)
+        .then((raw) => parseSlots(raw, m.id))
+        .catch(() => []), // Per-model slots failure is non-fatal — return empty.
+    ),
+  );
+
+  // Build keyed map: modelId → SlotStats[].
+  const modelSlots: Record<string, SlotStats[]> = {};
+  activeModels.forEach((m, i) => {
+    modelSlots[m.id] = modelSlotsArr[i] ?? [];
+  });
+
+  // Fallback: if /v1/models failed entirely, try the classic /slots endpoint
+  // (no model param) for backward compat with plain llama.cpp servers.
+  let legacySlots: SlotStats[] | undefined;
+  if (models === undefined && Object.keys(modelSlots).length === 0) {
+    const slotsRaw = await fetchJson(root + "/slots", safeSignal, headers, fetchFn);
+    if (slotsRaw) {
+      legacySlots = parseSlots(slotsRaw);
+    }
   }
 
   return {
     backend,
     error,
     props,
-    slots,
+    modelSlots: Object.keys(modelSlots).length > 0
+      ? modelSlots
+      : legacySlots && legacySlots.length > 0
+        ? { "": legacySlots }  // Legacy fallback — no model id available.
+        : undefined,
     models,
     health,
-    metrics,
     fetchedAt: Date.now(),
   };
 }

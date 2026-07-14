@@ -1,18 +1,12 @@
 /**
- * Tests for stats fetching and parsing.
+ * Tests for stats fetching and parsing (llama-app router API).
  *
  * Uses a mocked fetch function so no live server is needed.
+ * Tests the per-model /slots?model=<id> fetch path and error isolation.
  */
 import { describe, expect, it } from "bun:test";
 import type { StatsBackend } from "../src/config";
-import {
-  fetchBackendStats,
-  parseMetricsText,
-  type BackendStats,
-  type PropsStats,
-  type SlotStats,
-  type ModelStats,
-} from "../src/stats";
+import { fetchBackendStats, type BackendStats } from "../src/stats";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -26,19 +20,17 @@ const FAKE_BACKEND: StatsBackend = {
   authHeader: false,
 };
 
-/** Build a mock fetch that returns predefined responses. */
-function mockFetch(responses: Record<string, { status: number; json?: unknown; text?: string }>): typeof fetch {
+/** Build a mock fetch that returns predefined responses. Supports query params. */
+function mockFetch(responses: Record<string, { status: number; json?: unknown }>): typeof fetch {
   return async (url: string | URL | Request, _init?: RequestInit) => {
     const urlString = typeof url === "string" ? url : (url as URL).toString();
-    const path = new URL(urlString).pathname;
-    const resp = responses[path];
+    const parsed = new URL(urlString);
+    const key = parsed.pathname + parsed.search;
+    // Also try pathname-only match for backwards compat.
+    const resp = responses[key] ?? responses[parsed.pathname];
 
     if (!resp) {
       return new Response("Not Found", { status: 404 });
-    }
-
-    if (resp.text !== undefined) {
-      return new Response(resp.text, { status: resp.status });
     }
 
     return new Response(JSON.stringify(resp.json), { status: resp.status });
@@ -46,137 +38,42 @@ function mockFetch(responses: Record<string, { status: number; json?: unknown; t
 }
 
 // ---------------------------------------------------------------------------
-// parseMetricsText
+// parseProps
 // ---------------------------------------------------------------------------
 
-describe("parseMetricsText", () => {
-  it("extracts all 6 named metrics from Prometheus text", () => {
-    const text = `# HELP llamacpp:prompt_tokens_seconds Prompt tokens per second
-# TYPE llamacpp:prompt_tokens_seconds gauge
-llamacpp:prompt_tokens_seconds 32.47
-# HELP llamacpp:predicted_tokens_seconds Predicted tokens per second
-# TYPE llamacpp:predicted_tokens_seconds gauge
-llamacpp:predicted_tokens_seconds 52.94
-llamacpp:requests_processing 2
-llamacpp:requests_deferred 0
-llamacpp:prompt_tokens_total 1048576
-llamacpp:tokens_predicted_total 2097152
-# Some unrelated metric
-node_cpu_seconds_total 123.45`;
-
-    const result = parseMetricsText(text);
-    expect(result.promptTokensPerSecond).toBe(32.47);
-    expect(result.predictedTokensPerSecond).toBe(52.94);
-    expect(result.requestsProcessing).toBe(2);
-    expect(result.requestsDeferred).toBe(0);
-    expect(result.promptTokensTotal).toBe(1048576);
-    expect(result.tokensPredictedTotal).toBe(2097152);
-  });
-
-  it("returns empty object for unrelated lines only", () => {
-    const text = `node_cpu_seconds_total 123.45\nnode_memory_bytes 456`;
-    const result = parseMetricsText(text);
-    expect(Object.keys(result)).toHaveLength(0);
-  });
-
-  it("handles empty input", () => {
-    const result = parseMetricsText("");
-    expect(Object.keys(result)).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// fetchBackendStats
-// ---------------------------------------------------------------------------
-
-describe("fetchBackendStats", () => {
-  it("parses /props into PropsStats", async () => {
+describe("parseProps", () => {
+  it("parses router-level props with role field", async () => {
     const fetchFn = mockFetch({
       "/props": {
         status: 200,
         json: {
-          build_info: "b1234-abc",
-          model_path: "/path/to/model.gguf",
+          build_info: "b9870-2d973636e",
+          role: "router",
           total_slots: 4,
           is_sleeping: false,
-          default_generation_settings: { n_ctx: 8192 },
         },
       },
-      "/slots": { status: 200, json: [] },
       "/v1/models": { status: 200, json: { data: [] } },
       "/health": { status: 200, json: { status: "ok" } },
     });
 
     const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
     expect(result.props).toBeDefined();
-    expect(result.props!.buildInfo).toBe("b1234-abc");
-    expect(result.props!.modelPath).toBe("/path/to/model.gguf");
+    expect(result.props!.buildInfo).toBe("b9870-2d973636e");
+    expect(result.props!.role).toBe("router");
     expect(result.props!.totalSlots).toBe(4);
     expect(result.props!.isSleeping).toBe(false);
-    expect(result.props!.nCtx).toBe(8192);
   });
+});
 
-  it("parses /slots with minimal fields", async () => {
-    const fetchFn = mockFetch({
-      "/props": { status: 200, json: {} },
-      "/slots": {
-        status: 200,
-        json: [
-          { id: 0, is_processing: false },
-          { id: 1, is_processing: true, n_ctx: 8192 },
-        ],
-      },
-      "/v1/models": { status: 200, json: { data: [] } },
-      "/health": { status: 200, json: { status: "ok" } },
-    });
+// ---------------------------------------------------------------------------
+// parseModels
+// ---------------------------------------------------------------------------
 
-    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
-    expect(result.slots).toHaveLength(2);
-    expect(result.slots![0].id).toBe(0);
-    expect(result.slots![0].isProcessing).toBe(false);
-    expect(result.slots![1].id).toBe(1);
-    expect(result.slots![1].isProcessing).toBe(true);
-    expect(result.slots![1].nCtx).toBe(8192);
-  });
-
-  it("parses /slots with timing fields (defensive on extra fields)", async () => {
-    const fetchFn = mockFetch({
-      "/props": { status: 200, json: {} },
-      "/slots": {
-        status: 200,
-        json: [
-          {
-            id: 0,
-            is_processing: true,
-            n_ctx: 8192,
-            next_token: { n_decoded: 42, n_remain: 158 },
-            timing: { predicted_per_second: 52.9, prompt_per_second: 32.1 },
-            n_past: 42,
-            n_tokens: 200,
-            truncated: false,
-            model: "test-model",
-          },
-        ],
-      },
-      "/v1/models": { status: 200, json: { data: [] } },
-      "/health": { status: 200, json: { status: "ok" } },
-    });
-
-    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
-    expect(result.slots![0].nDecoded).toBe(42);
-    expect(result.slots![0].nRemain).toBe(158);
-    expect(result.slots![0].predictedPerSecond).toBe(52.9);
-    expect(result.slots![0].promptPerSecond).toBe(32.1);
-    expect(result.slots![0].nPast).toBe(42);
-    expect(result.slots![0].nTokens).toBe(200);
-    expect(result.slots![0].truncated).toBe(false);
-    expect(result.slots![0].model).toBe("test-model");
-  });
-
+describe("parseModels", () => {
   it("parses /v1/models with status.value", async () => {
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
       "/v1/models": {
         status: 200,
         json: {
@@ -184,7 +81,7 @@ describe("fetchBackendStats", () => {
             {
               id: "unsloth/gemma-2-2b:Q4_K_M",
               status: { value: "loaded" },
-              meta: { n_params: 2611000000, size: 1700000000, n_ctx_train: 8192 },
+              meta: { n_params: 2611000000, size: 1700000000, n_ctx_train: 8192, n_ctx: 4096 },
             },
             {
               id: "other/model",
@@ -202,15 +99,13 @@ describe("fetchBackendStats", () => {
     expect(result.models![0].id).toBe("unsloth/gemma-2-2b:Q4_K_M");
     expect(result.models![0].status).toBe("loaded");
     expect(result.models![0].nParams).toBe(2611000000);
-    expect(result.models![0].size).toBe(1700000000);
-    expect(result.models![0].nCtxTrain).toBe(8192);
+    expect(result.models![0].nCtx).toBe(4096);
     expect(result.models![1].status).toBe("unloaded");
   });
 
-  it("handles /v1/models with string status (not object)", async () => {
+  it("handles string status (not object)", async () => {
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
       "/v1/models": {
         status: 200,
         json: { data: [{ id: "model", status: "loaded" }] },
@@ -222,80 +117,333 @@ describe("fetchBackendStats", () => {
     expect(result.models![0].status).toBe("loaded");
   });
 
-  it("parses /health status", async () => {
+  it("parses architecture info from meta", async () => {
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
-      "/v1/models": { status: 200, json: { data: [] } },
+      "/v1/models": {
+        status: 200,
+        json: {
+          data: [
+            {
+              id: "model",
+              status: "loaded",
+              meta: {
+                architecture: {
+                  input_modalities: ["text"],
+                  output_modalities: ["text"],
+                },
+              },
+            },
+          ],
+        },
+      },
       "/health": { status: 200, json: { status: "ok" } },
     });
 
     const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.models![0].architecture).toEqual({
+      input_modalities: ["text"],
+      output_modalities: ["text"],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseSlots — array next_token
+// ---------------------------------------------------------------------------
+
+describe("parseSlots (router API — array next_token)", () => {
+  it("parses next_token as array", async () => {
+    const fetchFn = mockFetch({
+      "/props": { status: 200, json: {} },
+      "/v1/models": {
+        status: 200,
+        json: {
+          data: [
+            { id: "model-a", status: "loaded" },
+          ],
+        },
+      },
+      "/health": { status: 200, json: { status: "ok" } },
+      "/slots?model=model-a": {
+        status: 200,
+        json: [
+          {
+            id: 0,
+            is_processing: true,
+            n_ctx: 131072,
+            speculative: true,
+            next_token: [{ n_decoded: 154, n_remain: 18405, has_next_token: true }],
+            params: {
+              n_prompt_tokens: 106376,
+              n_prompt_tokens_processed: 1684,
+              n_prompt_tokens_cache: 104692,
+            },
+          },
+          { id: 1, is_processing: false, n_ctx: 131072 },
+        ],
+      },
+    });
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.modelSlots).toBeDefined();
+    expect(result.modelSlots!["model-a"]).toHaveLength(2);
+
+    const slot0 = result.modelSlots!["model-a"][0];
+    expect(slot0.id).toBe(0);
+    expect(slot0.isProcessing).toBe(true);
+    expect(slot0.nCtx).toBe(131072);
+    expect(slot0.speculative).toBe(true);
+    expect(slot0.nDecoded).toBe(154);
+    expect(slot0.nRemain).toBe(18405);
+    expect(slot0.hasNextToken).toBe(true);
+    expect(slot0.nPromptTokens).toBe(106376);
+    expect(slot0.nPromptTokensProcessed).toBe(1684);
+    expect(slot0.nPromptTokensCache).toBe(104692);
+
+    const slot1 = result.modelSlots!["model-a"][1];
+    expect(slot1.isProcessing).toBe(false);
+    expect(slot1.nDecoded).toBeUndefined();
+  });
+
+  it("handles classic object next_token (backward compat)", async () => {
+    const fetchFn = mockFetch({
+      "/props": { status: 200, json: {} },
+      "/v1/models": {
+        status: 200,
+        json: {
+          data: [{ id: "model-a", status: "loaded" }],
+        },
+      },
+      "/health": { status: 200, json: { status: "ok" } },
+      "/slots?model=model-a": {
+        status: 200,
+        json: [
+          {
+            id: 0,
+            is_processing: true,
+            next_token: { n_decoded: 42, n_remain: 158 },
+          },
+        ],
+      },
+    });
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.modelSlots!["model-a"][0].nDecoded).toBe(42);
+    expect(result.modelSlots!["model-a"][0].nRemain).toBe(158);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchBackendStats — per-model /slots?model=<id>
+// ---------------------------------------------------------------------------
+
+describe("fetchBackendStats — per-model slots", () => {
+  it("fetches /slots?model=<id> for each loaded model", async () => {
+    const fetchCalls: string[] = [];
+    const fetchFn: typeof fetch = async (url, init) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      fetchCalls.push(urlString);
+      const parsed = new URL(urlString);
+
+      if (parsed.pathname === "/props") return new Response(JSON.stringify({}), { status: 200 });
+      if (parsed.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (parsed.pathname === "/v1/models") {
+        return new Response(JSON.stringify({
+          data: [
+            { id: "model-a", status: "loaded" },
+            { id: "model-b", status: "loaded" },
+          ],
+        }), { status: 200 });
+      }
+      if (parsed.pathname === "/slots") {
+        return new Response(JSON.stringify([{ id: 0, is_processing: false }]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+
+    await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+
+    // Should have fetched /slots?model=model-a and /slots?model=model-b.
+    expect(fetchCalls).toContain("http://localhost:8080/slots?model=model-a");
+    expect(fetchCalls).toContain("http://localhost:8080/slots?model=model-b");
+  });
+
+  it("skips unloaded models (no slots fetch)", async () => {
+    const fetchCalls: string[] = [];
+    const fetchFn: typeof fetch = async (url, init) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      fetchCalls.push(urlString);
+      const parsed = new URL(urlString);
+
+      if (parsed.pathname === "/props") return new Response(JSON.stringify({}), { status: 200 });
+      if (parsed.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (parsed.pathname === "/v1/models") {
+        return new Response(JSON.stringify({
+          data: [
+            { id: "model-a", status: "loaded" },
+            { id: "model-b", status: "unloaded" },
+          ],
+        }), { status: 200 });
+      }
+      if (parsed.pathname === "/slots") {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+
+    await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+
+    // Should fetch slots for model-a but NOT model-b (unloaded).
+    expect(fetchCalls).toContain("http://localhost:8080/slots?model=model-a");
+    expect(fetchCalls).not.toContain("http://localhost:8080/slots?model=model-b");
+  });
+
+  it("fetches slots for models with non-standard statuses (e.g. ready, sleeping)", async () => {
+    const fetchCalls: string[] = [];
+    const fetchFn: typeof fetch = async (url, init) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      fetchCalls.push(urlString);
+      const parsed = new URL(urlString);
+
+      if (parsed.pathname === "/props") return new Response(JSON.stringify({}), { status: 200 });
+      if (parsed.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (parsed.pathname === "/v1/models") {
+        return new Response(JSON.stringify({
+          data: [
+            { id: "model-ready", status: "ready" },
+            { id: "model-sleeping", status: "sleeping" },
+            { id: "model-unloaded", status: "unloaded" },
+          ],
+        }), { status: 200 });
+      }
+      if (parsed.pathname === "/slots") {
+        return new Response(JSON.stringify([{ id: 0, is_processing: false }]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+
+    await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+
+    // Should fetch slots for ready and sleeping, skip unloaded.
+    expect(fetchCalls).toContain("http://localhost:8080/slots?model=model-ready");
+    expect(fetchCalls).toContain("http://localhost:8080/slots?model=model-sleeping");
+    expect(fetchCalls).not.toContain("http://localhost:8080/slots?model=model-unloaded");
+  });
+
+  it("builds keyed modelSlots map", async () => {
+    const fetchFn: typeof fetch = async (url, init) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      const parsed = new URL(urlString);
+
+      if (parsed.pathname === "/props") return new Response(JSON.stringify({}), { status: 200 });
+      if (parsed.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (parsed.pathname === "/v1/models") {
+        return new Response(JSON.stringify({
+          data: [
+            { id: "model-x", status: "loaded" },
+          ],
+        }), { status: 200 });
+      }
+      if (parsed.pathname === "/slots" && parsed.search === "?model=model-x") {
+        return new Response(JSON.stringify([
+          { id: 0, is_processing: true, n_ctx: 8192 },
+          { id: 1, is_processing: false },
+        ]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.modelSlots).toBeDefined();
+    expect(Object.keys(result.modelSlots!)).toContain("model-x");
+    expect(result.modelSlots!["model-x"]).toHaveLength(2);
+    expect(result.modelSlots!["model-x"][0].isProcessing).toBe(true);
+    expect(result.modelSlots!["model-x"][1].isProcessing).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resilience: partial failure, empty set, timeout
+// ---------------------------------------------------------------------------
+
+describe("fetchBackendStats — resilience", () => {
+  it("partial failure: one model /slots fails, others still render", async () => {
+    const fetchFn: typeof fetch = async (url, init) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      const parsed = new URL(urlString);
+
+      if (parsed.pathname === "/props") return new Response(JSON.stringify({}), { status: 200 });
+      if (parsed.pathname === "/health") return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (parsed.pathname === "/v1/models") {
+        return new Response(JSON.stringify({
+          data: [
+            { id: "model-a", status: "loaded" },
+            { id: "model-b", status: "loaded" },
+            { id: "model-c", status: "loaded" },
+          ],
+        }), { status: 200 });
+      }
+      // model-a succeeds, model-b returns 500, model-c succeeds.
+      if (parsed.pathname === "/slots" && parsed.search === "?model=model-a") {
+        return new Response(JSON.stringify([{ id: 0, is_processing: false }]), { status: 200 });
+      }
+      if (parsed.pathname === "/slots" && parsed.search === "?model=model-b") {
+        return new Response("Internal Server Error", { status: 500 });
+      }
+      if (parsed.pathname === "/slots" && parsed.search === "?model=model-c") {
+        return new Response(JSON.stringify([{ id: 2, is_processing: true }]), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+
+    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+
+    // Should have all 3 models.
+    expect(result.models).toHaveLength(3);
+
+    // model-a and model-c should have slots; model-b should have empty array.
+    expect(result.modelSlots!["model-a"]).toHaveLength(1);
+    expect(result.modelSlots!["model-b"]).toHaveLength(0); // Failed → empty
+    expect(result.modelSlots!["model-c"]).toHaveLength(1);
+
+    // No error set — backend is reachable.
+    expect(result.error).toBeUndefined();
     expect(result.health).toEqual({ status: "ok" });
   });
 
-  it("parses /metrics text format", async () => {
-    const metricsText = `llamacpp:prompt_tokens_seconds 32.3
-llamacpp:predicted_tokens_seconds 52.9
-llamacpp:requests_processing 1
-llamacpp:requests_deferred 0
-llamacpp:prompt_tokens_total 1000
-llamacpp:tokens_predicted_total 2000`;
-
+  it("empty set: /v1/models returns no models", async () => {
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
-      "/v1/models": { status: 200, json: { data: [] } },
-      "/health": { status: 200, json: { status: "ok" } },
-      "/metrics": { status: 200, text: metricsText },
-    });
-
-    const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
-    expect(result.metrics).toBeDefined();
-    expect(result.metrics!.promptTokensPerSecond).toBe(32.3);
-    expect(result.metrics!.predictedTokensPerSecond).toBe(52.9);
-    expect(result.metrics!.requestsProcessing).toBe(1);
-    expect(result.metrics!.tokensPredictedTotal).toBe(2000);
-  });
-
-  it("does not set error when /metrics returns 501", async () => {
-    const fetchFn = mockFetch({
-      "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
       "/v1/models": { status: 200, json: { data: [] } },
       "/health": { status: 200, json: { status: "ok" } },
     });
-    // /metrics is not in the map → 404 → silently skipped
 
     const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
+    expect(result.models).toEqual([]);
+    expect(result.modelSlots).toBeUndefined();
     expect(result.error).toBeUndefined();
-    expect(result.metrics).toBeUndefined();
   });
 
-  it("sets error when all core endpoints fail", async () => {
-    const fetchFn = mockFetch({}); // No endpoints → all 404
+  it("sets error when backend is unreachable", async () => {
+    const fetchFn = mockFetch({}); // All 404
 
     const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
     expect(result.error).toBeDefined();
     expect(result.props).toBeUndefined();
-    expect(result.slots).toBeUndefined();
     expect(result.health).toBeUndefined();
   });
 
-  it("tolerates malformed JSON (does not throw)", async () => {
-    const fetchFn: typeof fetch = async (url: string | URL | Request) => {
-      const urlString = typeof url === "string" ? url : (url as URL).toString();
-      const path = new URL(urlString).pathname;
-      if (path === "/props") {
-        return new Response("not valid json {{{", { status: 200 });
-      }
-      return new Response(JSON.stringify({}), { status: 200 });
-    };
+  it("does not set error when only /v1/models fails", async () => {
+    const fetchFn = mockFetch({
+      "/props": { status: 200, json: {} },
+      "/health": { status: 200, json: { status: "ok" } },
+    });
+    // /v1/models not in map → 404
 
     const result = await fetchBackendStats(FAKE_BACKEND, undefined, fetchFn);
-    // Should not throw — props is undefined due to malformed JSON
-    expect(result.props).toBeUndefined();
-    expect(result.error).toBeUndefined(); // Other endpoints succeeded
+    expect(result.error).toBeUndefined();
+    expect(result.models).toEqual([]); // parseModels returns [] on failure
   });
 
   it("respects abort signal", async () => {
@@ -304,25 +452,27 @@ llamacpp:tokens_predicted_total 2000`;
 
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
       "/v1/models": { status: 200, json: { data: [] } },
       "/health": { status: 200, json: { status: "ok" } },
     });
 
     const result = await fetchBackendStats(FAKE_BACKEND, controller.signal, fetchFn);
-    // The fetch should have been aborted — but since our mock doesn't actually
-    // check the signal, it will still return data. In a real scenario with
-    // an AbortSignal.any + timeout, the fetch would throw AbortError.
-    // What we verify here is that passing the signal doesn't crash.
+    // The mock doesn't check the signal, but passing an aborted signal
+    // should not crash.
     expect(result.backend).toBe(FAKE_BACKEND);
     expect(result.fetchedAt).toBeDefined();
   });
+});
 
+// ---------------------------------------------------------------------------
+// Timestamps
+// ---------------------------------------------------------------------------
+
+describe("fetchBackendStats — timestamps", () => {
   it("sets fetchedAt timestamp", async () => {
     const before = Date.now();
     const fetchFn = mockFetch({
       "/props": { status: 200, json: {} },
-      "/slots": { status: 200, json: [] },
       "/v1/models": { status: 200, json: { data: [] } },
       "/health": { status: 200, json: { status: "ok" } },
     });

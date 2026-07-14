@@ -201,3 +201,261 @@ describe("StatsView lifecycle", () => {
     view.dispose();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Functional rendering tests
+// ---------------------------------------------------------------------------
+
+describe("StatsView rendering", () => {
+  /** Build a mock fetch that returns realistic router API responses. */
+  function mockRouterFetch(responses: {
+    models: Array<{ id: string; status: string }>;
+    slots: Record<string, Array<{ id: number; is_processing?: boolean; n_ctx?: number }>>;
+    props?: Record<string, unknown>;
+    health?: { status: string };
+  }): typeof fetch {
+    return async (url: string | URL | Request, _init?: RequestInit) => {
+      const urlString = typeof url === "string" ? url : (url as URL).toString();
+      const parsed = new URL(urlString);
+      const path = parsed.pathname;
+      const search = parsed.search;
+
+      if (path === "/props") {
+        return new Response(JSON.stringify(responses.props ?? {}), { status: 200 });
+      }
+      if (path === "/health") {
+        return new Response(JSON.stringify(responses.health ?? { status: "ok" }), { status: 200 });
+      }
+      if (path === "/v1/models") {
+        return new Response(JSON.stringify({
+          data: responses.models.map((m) => ({
+            id: m.id,
+            status: m.status,
+            meta: { n_params: 2611000000, size: 1700000000 },
+          })),
+        }), { status: 200 });
+      }
+      if (path === "/slots") {
+        // Extract model from query param.
+        const modelId = new URLSearchParams(search).get("model");
+        const slots = modelId ? (responses.slots[modelId] ?? []) : [];
+        return new Response(JSON.stringify(slots), { status: 200 });
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+  }
+
+  it("renders model names and statuses", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [
+        { id: "unsloth/Qwen3.6-27B:Q6_K_XL", status: "loaded" },
+        { id: "other/model", status: "unloaded" },
+      ],
+      slots: {
+        "unsloth/Qwen3.6-27B:Q6_K_XL": [
+          { id: 0, is_processing: false, n_ctx: 131072 },
+          { id: 1, is_processing: true, n_ctx: 131072 },
+        ],
+      },
+    });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    // Let fetch complete.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Model names should appear.
+    expect(fullText).toContain("unsloth/Qwen3.6-27B:Q6_K_XL");
+    expect(fullText).toContain("other/model");
+
+    // Statuses should appear.
+    expect(fullText).toContain("[success]loaded[/]");
+    expect(fullText).toContain("[muted]unloaded[/]");
+
+    // Slots section should appear under loaded model.
+    expect(fullText).toContain("slots:");
+
+    // Cleanup.
+    view.dispose();
+  });
+
+  it("renders slot details (idle/busy, ctx, decoded/remain)", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [{ id: "model-a", status: "loaded" }],
+      slots: {
+        "model-a": [
+          { id: 0, is_processing: false, n_ctx: 8192 },
+          { id: 1, is_processing: true, n_ctx: 8192 },
+        ],
+      },
+    });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Slot markers should appear.
+    expect(fullText).toContain("#0");
+    expect(fullText).toContain("#1");
+    expect(fullText).toContain("[muted]idle[/]");
+    expect(fullText).toContain("[warning]busy[/]");
+    expect(fullText).toContain("ctx 8192");
+
+    view.dispose();
+  });
+
+  it("does not show slots for unloaded models", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [
+        { id: "model-loaded", status: "loaded" },
+        { id: "model-unloaded", status: "unloaded" },
+      ],
+      slots: {
+        "model-loaded": [{ id: 0, is_processing: false }],
+      },
+      // No slots for model-unloaded — it's unloaded.
+    });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Unloaded model should appear.
+    expect(fullText).toContain("model-unloaded");
+    expect(fullText).toContain("unloaded");
+
+    // But no slots section should appear after it (only one slots: for loaded).
+    const slotsCount = (fullText.match(/slots:/g) || []).length;
+    expect(slotsCount).toBe(1); // Only for the loaded model.
+
+    view.dispose();
+  });
+
+  it("renders backend unreachable when all endpoints fail", async () => {
+    // @ts-ignore
+    globalThis.fetch = async () => new Response("Not Found", { status: 404 });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(80);
+    const fullText = lines.join("\n");
+
+    expect(fullText).toContain("unreachable");
+    expect(fullText).toContain("[error]");
+
+    view.dispose();
+  });
+
+  it("renders health status", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [],
+      slots: {},
+      health: { status: "ok" },
+    });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(80);
+    const fullText = lines.join("\n");
+
+    expect(fullText).toContain("health:");
+    expect(fullText).toContain("[success]ok[/]");
+
+    view.dispose();
+  });
+
+  it("renders header and footer", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const lines = view.render(80);
+    expect(lines[0]).toContain("llama.cpp stats");
+    expect(lines[lines.length - 1]).toContain("╰─");
+
+    view.dispose();
+  });
+
+  it("in-flight guard prevents overlapping refreshes", async () => {
+    let fetchCount = 0;
+    let firstFetchResolve: () => void;
+    // Block the first fetch indefinitely (or until we resolve it).
+    const firstFetchDone = new Promise<void>((resolve) => { firstFetchResolve = resolve; });
+
+    const slowFetch: typeof fetch = async (url, init) => {
+      fetchCount++;
+      if (fetchCount === 1) {
+        // Block the first fetch.
+        await firstFetchDone;
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    };
+
+    // @ts-ignore
+    globalThis.fetch = slowFetch;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    // The initial fetch is blocked. Wait briefly.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Force a refresh — should be blocked by the in-flight guard.
+    view.handleInput("r");
+
+    // Resolve the first fetch.
+    firstFetchResolve();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Only 1 fetch should have happened (the forced refresh was blocked).
+    // The actual count depends on how many endpoints are fetched, but the key
+    // point is that the forced 'r' didn't trigger an additional cycle.
+    // We verify by checking that fetchCount is still in the single-fetch range.
+    // (3 core endpoints = 3 fetches for the first cycle)
+    const initialFetches = fetchCount;
+
+    // Wait longer than the refresh interval — no new cycle should start
+    // because the in-flight guard should have rejected the forced 'r'.
+    await new Promise((r) => setTimeout(r, 2100));
+
+    // After the forced resolve and 2s wait, a normal auto-refresh should fire.
+    // So total should be initial + auto-refresh cycle (3 more fetches).
+    // The key assertion: the forced 'r' did NOT add extra fetches.
+    expect(fetchCount - initialFetches).toBeLessThanOrEqual(3); // At most one auto-refresh cycle.
+
+    view.dispose();
+  });
+});

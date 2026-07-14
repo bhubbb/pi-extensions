@@ -4,12 +4,22 @@
  * Uses recursive setTimeout (not setInterval) to avoid request stacking
  * when server response time exceeds the refresh interval.
  * Aborts all in-flight fetches when closed.
+ *
+ * Layout (nested model → slots):
+ *   [backend] url  build info
+ *     health: ok
+ *     models:
+ *       model-id   loaded   N params   N GB
+ *         slots:
+ *           #0  idle  ctx N  spec: yes
+ *           #1  busy  ctx N  decoded N  remain N  prompt X/Y
+ *       model-id   unloaded
  */
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { StatsBackend } from "./config";
-import type { BackendStats, PropsStats, SlotStats, ModelStats, MetricsStats } from "./stats";
+import type { BackendStats, PropsStats, SlotStats, ModelStats } from "./stats";
 import { fetchBackendStats } from "./stats";
 
 // ---------------------------------------------------------------------------
@@ -127,48 +137,61 @@ export class StatsView implements Component {
       return lines;
     }
 
-    // Model / slots / health / ctx line.
-    const infoParts: string[] = [];
-    if (stat.props?.modelPath) {
-      infoParts.push(`model: ${stat.props.modelPath}`);
-    }
-    if (stat.props?.totalSlots !== undefined) {
-      infoParts.push(`slots: ${stat.props.totalSlots}`);
-    }
-    if (stat.props?.isSleeping !== undefined) {
-      infoParts.push(`sleeping: ${stat.props.isSleeping ? "yes" : "no"}`);
-    }
+    // Health line.
     if (stat.health?.status) {
       const statusColor = stat.health.status === "ok" ? "success" : "error";
-      infoParts.push(`health: ${this.theme.fg(statusColor, stat.health.status)}`);
-    }
-    if (stat.props?.nCtx) {
-      infoParts.push(`ctx: ${stat.props.nCtx}`);
-    }
-    if (infoParts.length > 0) {
-      lines.push(`${prefix}  ${infoParts.join("   ")}`);
+      lines.push(`${prefix}  health: ${this.theme.fg(statusColor, stat.health.status)}`);
     }
 
-    // Slots detail.
-    if (stat.slots && stat.slots.length > 0) {
-      lines.push(`${prefix}  slots:`);
-      for (const slot of stat.slots) {
-        lines.push(this.renderSlot(slot, width, `${prefix}    `));
-      }
+    // Router role (informational).
+    if (stat.props?.role) {
+      lines.push(`${prefix}  role: ${this.theme.fg("muted", stat.props.role)}`);
     }
 
-    // Models list.
+    // Models with nested slots.
     if (stat.models && stat.models.length > 0) {
       lines.push(`${prefix}  models:`);
       for (const model of stat.models) {
-        lines.push(this.renderModel(model, width, `${prefix}    `));
+        lines.push(...this.renderModelWithSlots(model, stat.modelSlots?.[model.id], width, `${prefix}    `));
       }
     }
 
-    // Metrics (prometheus).
-    if (stat.metrics && this.hasMetrics(stat.metrics)) {
-      lines.push(`${prefix}  metrics (prometheus):`);
-      lines.push(this.renderMetrics(stat.metrics, width, `${prefix}    `));
+    // Fallback: if no models list but we have legacy slots, render them flat.
+    if ((!stat.models || stat.models.length === 0) && stat.modelSlots) {
+      const legacyKeys = Object.keys(stat.modelSlots);
+      if (legacyKeys.length > 0) {
+        const legacySlots = stat.modelSlots[legacyKeys[0]];
+        if (legacySlots && legacySlots.length > 0) {
+          lines.push(`${prefix}  slots:`);
+          for (const slot of legacySlots) {
+            lines.push(this.renderSlot(slot, width, `${prefix}    `));
+          }
+        }
+      }
+    }
+
+    return lines;
+  }
+
+  /** Render a model line + its nested slots (if any). */
+  private renderModelWithSlots(model: ModelStats, slots: SlotStats[] | undefined, width: number, prefix: string): string[] {
+    const lines: string[] = [];
+
+    // Model line: id  status  params  size
+    const modelParts = [
+      model.id,
+      model.status ? this.theme.fg(this.getModelStatusColor(model.status), model.status) : "",
+      model.nParams ? `${this.formatParams(model.nParams)} params` : "",
+      model.size ? `${this.formatBytes(model.size)}` : "",
+    ].filter(Boolean);
+    lines.push(truncateToWidth(`${prefix}${modelParts.join("  ")}`, width));
+
+    // Nested slots under this model.
+    if (slots && slots.length > 0) {
+      lines.push(`${prefix}  slots:`);
+      for (const slot of slots) {
+        lines.push(this.renderSlot(slot, width, `${prefix}    `));
+      }
     }
 
     return lines;
@@ -181,41 +204,31 @@ export class StatsView implements Component {
         ? this.theme.fg("warning", "busy")
         : this.theme.fg("muted", "idle"),
       slot.nCtx ? `ctx ${slot.nCtx}` : "",
-      slot.nDecoded !== undefined ? `decoded ${slot.nDecoded}` : "",
-      slot.nRemain !== undefined ? `remain ${slot.nRemain}` : "",
+      slot.speculative ? "spec: yes" : "",
     ].filter(Boolean);
 
+    // Processing details (only shown when slot is active or has token info).
+    if (slot.nDecoded !== undefined) {
+      parts.push(`decoded ${slot.nDecoded}`);
+    }
+    if (slot.nRemain !== undefined) {
+      parts.push(`remain ${slot.nRemain}`);
+    }
+    // Prompt token info.
+    if (slot.nPromptTokens !== undefined || slot.nPromptTokensProcessed !== undefined) {
+      const promptInfo = [
+        slot.nPromptTokens !== undefined ? slot.nPromptTokens.toString() : "?",
+        slot.nPromptTokensProcessed !== undefined ? slot.nPromptTokensProcessed.toString() : "?",
+      ].join("/");
+      parts.push(`prompt ${promptInfo}`);
+    }
+    if (slot.nPromptTokensCache !== undefined) {
+      parts.push(`cache ${slot.nPromptTokensCache}`);
+    }
+
+    // Timing tok/s (present in some builds, absent in most router builds).
     if (slot.predictedPerSecond) {
       parts.push(`${slot.predictedPerSecond.toFixed(1)} tok/s`);
-    }
-
-    return truncateToWidth(`${prefix}${parts.join("  ")}`, width);
-  }
-
-  private renderModel(model: ModelStats, width: number, prefix: string): string {
-    const parts = [
-      model.id,
-      model.status ? this.theme.fg(model.status === "loaded" ? "success" : "muted", model.status) : "",
-      model.nParams ? `${this.formatParams(model.nParams)} params` : "",
-      model.size ? `${this.formatBytes(model.size)}` : "",
-    ].filter(Boolean);
-
-    return truncateToWidth(`${prefix}${parts.join("  ")}`, width);
-  }
-
-  private renderMetrics(metrics: MetricsStats, width: number, prefix: string): string {
-    const parts: string[] = [];
-    if (metrics.promptTokensPerSecond !== undefined) {
-      parts.push(`prompt ${metrics.promptTokensPerSecond.toFixed(1)} tok/s`);
-    }
-    if (metrics.predictedTokensPerSecond !== undefined) {
-      parts.push(`predicted ${metrics.predictedTokensPerSecond.toFixed(1)} tok/s`);
-    }
-    const processing = metrics.requestsProcessing ?? 0;
-    const deferred = metrics.requestsDeferred ?? 0;
-    parts.push(`req ${processing}/${deferred}`);
-    if (metrics.tokensPredictedTotal !== undefined) {
-      parts.push(`total ${this.formatNumber(metrics.tokensPredictedTotal)} tok`);
     }
 
     return truncateToWidth(`${prefix}${parts.join("  ")}`, width);
@@ -315,8 +328,8 @@ export class StatsView implements Component {
   // -----------------------------------------------------------------
 
   private formatParams(n: number): string {
-    if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
-    if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+    if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
     if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
     return String(n);
   }
@@ -328,13 +341,9 @@ export class StatsView implements Component {
     return `${n} B`;
   }
 
-  private formatNumber(n: number): string {
-    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-    if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-    return String(Math.round(n));
-  }
-
-  private hasMetrics(m: MetricsStats): boolean {
-    return Object.values(m).some((v) => v !== undefined);
+  private getModelStatusColor(status: string): string {
+    if (status === "loaded") return "success";
+    if (status === "loading") return "warning";
+    return "muted";
   }
 }
