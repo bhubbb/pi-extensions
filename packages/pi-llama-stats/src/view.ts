@@ -164,7 +164,7 @@ export class StatsView implements Component {
         if (legacySlots && legacySlots.length > 0) {
           lines.push(`${prefix}  slots:`);
           for (const slot of legacySlots) {
-            lines.push(this.renderSlot(slot, width, `${prefix}    `));
+            lines.push(...this.renderSlot(slot, width, `${prefix}    `));
           }
         }
       }
@@ -190,14 +190,14 @@ export class StatsView implements Component {
     if (slots && slots.length > 0) {
       lines.push(`${prefix}  slots:`);
       for (const slot of slots) {
-        lines.push(this.renderSlot(slot, width, `${prefix}    `));
+        lines.push(...this.renderSlot(slot, width, `${prefix}    `));
       }
     }
 
     return lines;
   }
 
-  private renderSlot(slot: SlotStats, width: number, prefix: string): string {
+  private renderSlot(slot: SlotStats, width: number, prefix: string): string[] {
     // Determine the slot's phase: prompt-processing vs inference vs idle.
     // - Prompt processing: nPromptTokensProcessed < nPromptTokens (counting up)
     // - Inference: nDecoded > 0 and nRemain > 0
@@ -209,45 +209,99 @@ export class StatsView implements Component {
     const isInferencing = slot.nDecoded !== undefined && slot.nDecoded > 0
       && (slot.nRemain === undefined || slot.nRemain > 0);
 
-    const parts = [
-      `#${slot.id}`,
-      slot.isProcessing
-        ? isPromptProcessing
-          ? this.theme.fg("warning", "prompt")
-          : this.theme.fg("warning", "busy")
-        : this.theme.fg("muted", "idle"),
-      slot.nCtx ? `ctx ${slot.nCtx}` : "",
-      slot.speculative ? "spec: yes" : "",
-    ].filter(Boolean);
+    // Phase label — uses a status indicator (●/◐/○) and a human-readable word.
+    let phaseLabel: string;
+    let phaseColor: string;
+    if (slot.isProcessing) {
+      if (isPromptProcessing) {
+        phaseLabel = "◐ processing prompt";
+        phaseColor = "warning";
+      } else if (isInferencing) {
+        phaseLabel = "● generating";
+        phaseColor = "warning";
+      } else {
+        phaseLabel = "● busy";
+        phaseColor = "warning";
+      }
+    } else {
+      phaseLabel = "○ idle";
+      phaseColor = "muted";
+    }
 
-    // Prompt processing progress (processed / total + percentage).
+    // First line: slot id + phase + context size + speculative flag.
+    const headerParts = [
+      this.theme.fg(phaseColor, phaseLabel),
+      `#${slot.id}`,
+    ];
+    if (slot.nCtx) {
+      headerParts.push(`ctx ${this.formatContextWindow(slot.nCtx)}`);
+    }
+    if (slot.speculative) {
+      headerParts.push(this.theme.fg("muted", "speculative"));
+    }
+    if (slot.predictedPerSecond) {
+      headerParts.push(this.theme.fg("accent", `${slot.predictedPerSecond.toFixed(1)} tok/s`));
+    }
+    const lines: string[] = [
+      truncateToWidth(`${prefix}${headerParts.join("  ")}`, width),
+    ];
+
+    // Second line (during prompt processing): progress bar + numbers.
     if (isPromptProcessing && slot.nPromptTokens !== undefined && slot.nPromptTokensProcessed !== undefined) {
       const processed = slot.nPromptTokensProcessed;
       const total = slot.nPromptTokens;
-      // Guard against division by zero (empty prompt or malformed response).
-      const pct = total > 0 ? Math.floor((processed / total) * 100) : 0;
-      parts.push(`prompt ${processed}/${total} (${pct}%)`);
+      const pct = total > 0 ? (processed / total) * 100 : 0;
+      const bar = this.renderProgressBar(pct, 20);
+      const detailParts = [
+        `${this.formatNumber(processed)} / ${this.formatNumber(total)} tokens`,
+        `(${pct.toFixed(1)}%)`,
+      ];
+      // Add cache info if available.
+      if (slot.nPromptTokensCache !== undefined && slot.nPromptTokensCache > 0) {
+        const cacheTotal = total;
+        const cachePct = cacheTotal > 0 ? (slot.nPromptTokensCache / cacheTotal) * 100 : 0;
+        detailParts.push(
+          this.theme.fg("success", `cache: ${this.formatNumber(slot.nPromptTokensCache)} (${cachePct.toFixed(1)}%)`),
+        );
+      }
+      const detailLine = `${prefix}  ${bar}  ${detailParts.join("  ")}`;
+      lines.push(truncateToWidth(detailLine, width));
+      return lines;
     }
-    // Cache hit info (shown when prompt has cached tokens).
-    if (slot.nPromptTokensCache !== undefined && slot.nPromptTokensCache > 0) {
-      parts.push(`cache ${slot.nPromptTokensCache}`);
-    }
-    // Inference progress (decoded + remain).
+
+    // Third line (during inference): decoded + remaining + rate.
     if (isInferencing) {
+      const detailParts: string[] = [];
       if (slot.nDecoded !== undefined) {
-        parts.push(`decoded ${slot.nDecoded}`);
+        detailParts.push(`${this.formatNumber(slot.nDecoded)} decoded`);
       }
       if (slot.nRemain !== undefined && slot.nRemain > 0) {
-        parts.push(`remain ${slot.nRemain}`);
+        detailParts.push(`${this.formatNumber(slot.nRemain)} remaining`);
       }
+      const detailLine = `${prefix}  ${detailParts.join("  ·  ")}`;
+      lines.push(truncateToWidth(detailLine, width));
     }
 
-    // Timing tok/s (present in some builds, absent in most router builds).
-    if (slot.predictedPerSecond) {
-      parts.push(`${slot.predictedPerSecond.toFixed(1)} tok/s`);
-    }
+    return lines;
+  }
 
-    return truncateToWidth(`${prefix}${parts.join("  ")}`, width);
+  /** Render a simple ASCII progress bar (e.g. "██████████░░░░░░░░░░" for 50%). */
+  private renderProgressBar(percent: number, width: number): string {
+    const filled = Math.max(0, Math.min(width, Math.round((percent / 100) * width)));
+    const empty = width - filled;
+    return "█".repeat(filled) + "░".repeat(empty);
+  }
+
+  /** Format a context window size in human-readable form (e.g. 131072 → "131k"). */
+  private formatContextWindow(n: number): string {
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)}M`;
+    if (n >= 1024) return `${Math.round(n / 1024)}k`;
+    return String(n);
+  }
+
+  /** Format a number with thousand separators (e.g. 106376 → "106,376"). */
+  private formatNumber(n: number): string {
+    return n.toLocaleString("en-US");
   }
 
   // -----------------------------------------------------------------

@@ -310,9 +310,10 @@ describe("StatsView rendering", () => {
     // Slot markers should appear.
     expect(fullText).toContain("#0");
     expect(fullText).toContain("#1");
-    expect(fullText).toContain("[muted]idle[/]");
-    expect(fullText).toContain("[warning]busy[/]");
-    expect(fullText).toContain("ctx 8192");
+    expect(fullText).toContain("[muted]○ idle[/]");
+    expect(fullText).toContain("[warning]● busy[/]");
+    // Context window formatted as human-readable.
+    expect(fullText).toContain("ctx 8k");
 
     view.dispose();
   });
@@ -504,20 +505,25 @@ describe("StatsView rendering", () => {
     const lines = view.render(120);
     const fullText = lines.join("\n");
 
-    // Should show "prompt" label, not "busy".
-    expect(fullText).toContain("[warning]prompt[/]");
-    expect(fullText).not.toContain("[warning]busy[/]");
+    // Should show "processing prompt" label, not "generating" or "busy".
+    expect(fullText).toContain("[warning]◐ processing prompt[/]");
+    expect(fullText).not.toContain("[warning]● generating[/]");
+    expect(fullText).not.toContain("[warning]● busy[/]");
 
-    // Should show progress with percentage.
-    expect(fullText).toContain("prompt 1684/106376");
-    expect(fullText).toMatch(/prompt 1684\/106376 \(\d+%\)/);
+    // Should show progress with percentage (formatted with commas).
+    expect(fullText).toContain("1,684 / 106,376 tokens");
+    expect(fullText).toMatch(/\d+\.\d+%/);
+
+    // Should show progress bar (filled + empty blocks).
+    expect(fullText).toMatch(/[█░]+/);
 
     // Should NOT show decoded/remain during prompt processing.
-    expect(fullText).not.toContain("decoded 0");
-    expect(fullText).not.toContain("remain ");
+    expect(fullText).not.toContain("decoded");
+    expect(fullText).not.toContain("remaining");
 
-    // Should show cache count.
-    expect(fullText).toContain("cache 104692");
+    // Should show cache count with percentage.
+    expect(fullText).toContain("cache:");
+    expect(fullText).toContain("104,692");
 
     view.dispose();
   });
@@ -559,13 +565,13 @@ describe("StatsView rendering", () => {
     const lines = view.render(120);
     const fullText = lines.join("\n");
 
-    // Should show "busy" label, not "prompt".
-    expect(fullText).toContain("[warning]busy[/]");
-    expect(fullText).not.toContain("[warning]prompt[/]");
+    // Should show "generating" label, not "processing prompt".
+    expect(fullText).toContain("[warning]● generating[/]");
+    expect(fullText).not.toContain("[warning]◐ processing prompt[/]");
 
-    // Should show decoded/remain.
-    expect(fullText).toContain("decoded 154");
-    expect(fullText).toContain("remain 846");
+    // Should show decoded/remaining with comma formatting.
+    expect(fullText).toContain("154 decoded");
+    expect(fullText).toContain("846 remaining");
 
     view.dispose();
   });
@@ -593,7 +599,7 @@ describe("StatsView rendering", () => {
     const lines = view.render(120);
     const fullText = lines.join("\n");
 
-    expect(fullText).toContain("[muted]idle[/]");
+    expect(fullText).toContain("[muted]○ idle[/]");
 
     view.dispose();
   });
@@ -629,11 +635,15 @@ describe("StatsView rendering", () => {
     const lines = view.render(120);
     const fullText = lines.join("\n");
 
-    // Cache value must be rendered.
-    expect(fullText).toContain("cache 104692");
+    // Cache value must be rendered with comma formatting and percentage.
+    expect(fullText).toContain("cache:");
+    expect(fullText).toContain("104,692");
+    expect(fullText).toMatch(/cache: 104,692 \(\d+\.\d+%\)/);
 
     // Prompt progress should also be shown (sanity check).
-    expect(fullText).toMatch(/prompt 1684\/106376 \(\d+%\)/);
+    expect(fullText).toContain("1,684 / 106,376 tokens");
+    // Context window formatted as human-readable (131072 → 128k).
+    expect(fullText).toContain("ctx 128k");
 
     view.dispose();
   });
@@ -676,7 +686,9 @@ describe("StatsView rendering", () => {
 
     // Since nPromptTokens === 0, isPromptProcessing is false (guard added),
     // so the slot shows "busy" (from isProcessing=true) but no prompt progress.
-    expect(fullText).toContain("[warning]busy[/]");
+    expect(fullText).toContain("[warning]● busy[/]");
+    // No "processing prompt" label since total is 0.
+    expect(fullText).not.toContain("processing prompt");
 
     view.dispose();
   });
@@ -716,6 +728,47 @@ describe("StatsView rendering", () => {
     // Should show unreachable state.
     expect(fullText).toContain("unreachable");
     expect(fullText).toContain("[error]");
+
+    view.dispose();
+  });
+
+  it("uses human-readable numbers (commas, k/M suffixes)", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [
+        { id: "model-a", status: "loaded", nParams: 27_300_000_000, size: 26_000_000_000 },
+      ],
+      modelSlots: {
+        "model-a": [
+          {
+            id: 0,
+            isProcessing: false,
+            nCtx: 1048576, // 1M
+          },
+        ],
+      },
+    }];
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Large params formatted as billions.
+    expect(fullText).toMatch(/27\.\d+B params/);
+    // Large size formatted as GB.
+    expect(fullText).toMatch(/\d+\.\d+ GB/);
+    // Large context formatted as M.
+    expect(fullText).toContain("ctx 1.0M");
 
     view.dispose();
   });
