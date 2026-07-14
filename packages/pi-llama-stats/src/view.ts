@@ -198,32 +198,46 @@ export class StatsView implements Component {
   }
 
   private renderSlot(slot: SlotStats, width: number, prefix: string): string {
+    // Determine the slot's phase: prompt-processing vs inference vs idle.
+    // - Prompt processing: nPromptTokensProcessed < nPromptTokens (counting up)
+    // - Inference: nDecoded > 0 and nRemain > 0
+    // - Idle: nothing happening
+    const isPromptProcessing = slot.nPromptTokens !== undefined
+      && slot.nPromptTokensProcessed !== undefined
+      && slot.nPromptTokensProcessed < slot.nPromptTokens;
+    const isInferencing = slot.nDecoded !== undefined && slot.nDecoded > 0
+      && (slot.nRemain === undefined || slot.nRemain > 0);
+
     const parts = [
       `#${slot.id}`,
       slot.isProcessing
-        ? this.theme.fg("warning", "busy")
+        ? isPromptProcessing
+          ? this.theme.fg("warning", "prompt")
+          : this.theme.fg("warning", "busy")
         : this.theme.fg("muted", "idle"),
       slot.nCtx ? `ctx ${slot.nCtx}` : "",
       slot.speculative ? "spec: yes" : "",
     ].filter(Boolean);
 
-    // Processing details (only shown when slot is active or has token info).
-    if (slot.nDecoded !== undefined) {
-      parts.push(`decoded ${slot.nDecoded}`);
+    // Prompt processing progress (processed / total + percentage).
+    if (isPromptProcessing && slot.nPromptTokens !== undefined && slot.nPromptTokensProcessed !== undefined) {
+      const processed = slot.nPromptTokensProcessed;
+      const total = slot.nPromptTokens;
+      const pct = Math.floor((processed / total) * 100);
+      parts.push(`prompt ${processed}/${total} (${pct}%)`);
     }
-    if (slot.nRemain !== undefined) {
-      parts.push(`remain ${slot.nRemain}`);
-    }
-    // Prompt token info.
-    if (slot.nPromptTokens !== undefined || slot.nPromptTokensProcessed !== undefined) {
-      const promptInfo = [
-        slot.nPromptTokens !== undefined ? slot.nPromptTokens.toString() : "?",
-        slot.nPromptTokensProcessed !== undefined ? slot.nPromptTokensProcessed.toString() : "?",
-      ].join("/");
-      parts.push(`prompt ${promptInfo}`);
-    }
-    if (slot.nPromptTokensCache !== undefined) {
+    // Cache hit info (shown when prompt has cached tokens).
+    if (slot.nPromptTokensCache !== undefined && slot.nPromptTokensCache > 0) {
       parts.push(`cache ${slot.nPromptTokensCache}`);
+    }
+    // Inference progress (decoded + remain).
+    if (isInferencing) {
+      if (slot.nDecoded !== undefined) {
+        parts.push(`decoded ${slot.nDecoded}`);
+      }
+      if (slot.nRemain !== undefined && slot.nRemain > 0) {
+        parts.push(`remain ${slot.nRemain}`);
+      }
     }
 
     // Timing tok/s (present in some builds, absent in most router builds).

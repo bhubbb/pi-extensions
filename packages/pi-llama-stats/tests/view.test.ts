@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { StatsBackend } from "../src/config";
+import type { BackendStats } from "../src/stats";
 import { StatsView } from "../src/view";
 
 // ---------------------------------------------------------------------------
@@ -455,6 +456,144 @@ describe("StatsView rendering", () => {
     // So total should be initial + auto-refresh cycle (3 more fetches).
     // The key assertion: the forced 'r' did NOT add extra fetches.
     expect(fetchCount - initialFetches).toBeLessThanOrEqual(3); // At most one auto-refresh cycle.
+
+    view.dispose();
+  });
+
+  it("shows 'prompt' label and progress during prompt processing", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [{ id: "model-a", status: "loaded" }],
+      slots: {
+        "model-a": [
+          {
+            id: 0,
+            is_processing: true, // busy during prompt processing
+            n_ctx: 131072,
+            next_token: [], // no decoded yet — still processing prompt
+          },
+        ],
+      },
+    });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Manually inject slot data with prompt processing fields.
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [{
+          id: 0,
+          isProcessing: true,
+          nCtx: 131072,
+          nPromptTokens: 106376,
+          nPromptTokensProcessed: 1684, // processed < total = prompt processing
+          nPromptTokensCache: 104692,
+          nDecoded: 0,
+        }],
+      },
+    }];
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Should show "prompt" label, not "busy".
+    expect(fullText).toContain("[warning]prompt[/]");
+    expect(fullText).not.toContain("[warning]busy[/]");
+
+    // Should show progress with percentage.
+    expect(fullText).toContain("prompt 1684/106376");
+    expect(fullText).toMatch(/prompt 1684\/106376 \(\d+%\)/);
+
+    // Should NOT show decoded/remain during prompt processing.
+    expect(fullText).not.toContain("decoded 0");
+    expect(fullText).not.toContain("remain ");
+
+    // Should show cache count.
+    expect(fullText).toContain("cache 104692");
+
+    view.dispose();
+  });
+
+  it("shows 'busy' label and decoded/remain during inference", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockRouterFetch({
+      models: [{ id: "model-a", status: "loaded" }],
+      slots: {
+        "model-a": [{ id: 0, is_processing: true, n_ctx: 8192 }],
+      },
+    });
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Inject slot data showing inference phase.
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [{
+          id: 0,
+          isProcessing: true,
+          nCtx: 8192,
+          nPromptTokens: 1000,
+          nPromptTokensProcessed: 1000, // processed == total = done with prompt
+          nDecoded: 154,
+          nRemain: 846,
+        }],
+      },
+    }];
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    // Should show "busy" label, not "prompt".
+    expect(fullText).toContain("[warning]busy[/]");
+    expect(fullText).not.toContain("[warning]prompt[/]");
+
+    // Should show decoded/remain.
+    expect(fullText).toContain("decoded 154");
+    expect(fullText).toContain("remain 846");
+
+    view.dispose();
+  });
+
+  it("shows 'idle' label when slot is not processing", async () => {
+    // @ts-ignore
+    globalThis.fetch = mockFetchEmpty;
+
+    const tui = makeMockTUI();
+    const theme = makeMockTheme();
+    const view = new StatsView([FAKE_BACKEND], theme, tui, () => {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const viewAny = view as unknown as { stats: BackendStats[] };
+    viewAny.stats = [{
+      backend: FAKE_BACKEND,
+      fetchedAt: Date.now(),
+      models: [{ id: "model-a", status: "loaded" }],
+      modelSlots: {
+        "model-a": [{ id: 0, isProcessing: false, nCtx: 8192 }],
+      },
+    }];
+
+    const lines = view.render(120);
+    const fullText = lines.join("\n");
+
+    expect(fullText).toContain("[muted]idle[/]");
 
     view.dispose();
   });
