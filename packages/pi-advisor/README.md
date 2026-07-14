@@ -99,6 +99,11 @@ are selectable.
 | `/advisor on-done on\|off` | Toggle auto-review-on-finish → choose scope |
 | `/advisor on-todo on\|off` | Toggle auto-review on todo completion → choose scope |
 | `/advisor when-stuck off\|<N>` | Trigger advisor on N consecutive errors or N repeated identical tool calls → choose scope |
+| `/advisor context <mode>` | Set context mode (`full\|tail\|summary\|summary+tail`) → choose scope |
+| `/advisor tail <N>` | Set tail message count (integer >= 2) → choose scope |
+| `/advisor diff <mode>` | Set diff mode (`none\|stat\|snippets\|git-stat\|git-snippets`) → choose scope |
+| `/advisor strip-reasoning on\|off` | Toggle reasoning block stripping → choose scope |
+| `/advisor summary-model <spec>` | Set summary model (`executor\|off\|provider/id`) → choose scope |
 | `/advisor status` | Show the resolved configuration |
 | `/advise [show\|pipe\|steer]` | Run a one-off review now; default is `pipe` when idle and `steer` while the agent is running |
 

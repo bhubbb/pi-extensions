@@ -402,8 +402,18 @@ export function resolveEffectiveConfig(cwd, projectTrusted = true) {
     diffMode: pick(envDiffMode(), project.diffMode, global.diffMode, DEFAULTS.diffMode),
     diffMaxChars:
       project.diffMaxChars ?? global.diffMaxChars ?? DEFAULTS.diffMaxChars,
-    summaryModel:
-      pick(envSummaryModel(), project.summaryModel, global.summaryModel, DEFAULTS.summaryModel),
+    // Use explicit undefined check (not ??) so summaryModel: null (off) is not
+    // treated as "not set" and falling through to global/default.
+    summaryModel: (() => {
+      const e = envSummaryModel();
+      return e !== undefined
+        ? e
+        : project.summaryModel !== undefined
+          ? project.summaryModel
+          : global.summaryModel !== undefined
+            ? global.summaryModel
+            : DEFAULTS.summaryModel;
+    })(),
     summaryMaxTokens:
       project.summaryMaxTokens ?? global.summaryMaxTokens ?? DEFAULTS.summaryMaxTokens,
     summaryRefreshEvery:
@@ -438,4 +448,72 @@ export function isDisabled(cfg) {
 /** Extracted from upstream — kept here so advisor.ts can call the old names. */
 export function isUnconfigured(cfg) {
   return cfg.spec === undefined;
+}
+
+// ── Subcommand validators (pure functions, testable, zero side effects) ──────
+// Each returns { ok: true, patch: {...} } on success or { ok: false, error: "..." } on failure.
+// The /advisor handler dispatches to these, then calls pickScope() → persist() → notify().
+
+const VALID_CONTEXT_MODES = ["full", "tail", "summary", "summary+tail"];
+const VALID_DIFF_MODES = ["none", "stat", "snippets", "git-stat", "git-snippets"];
+
+/** Parse /advisor context <mode>. Returns contextMode patch or error. */
+export function parseContextMode(arg) {
+  const v = arg?.toLowerCase();
+  if (!v || !VALID_CONTEXT_MODES.includes(v)) {
+    return { ok: false, error: `Usage: /advisor context <${VALID_CONTEXT_MODES.join("|")}>` };
+  }
+  return { ok: true, patch: { contextMode: v } };
+}
+
+/** Parse /advisor tail <N>. Returns tailMessages patch or error. */
+export function parseTailMessages(arg) {
+  const n = arg !== undefined ? Number(arg) : NaN;
+  if (!Number.isInteger(n) || n < 2) {
+    return { ok: false, error: `Usage: /advisor tail <N>  (integer >= 2)` };
+  }
+  return { ok: true, patch: { tailMessages: n } };
+}
+
+/** Parse /advisor diff <mode>. Returns diffMode patch or error. */
+export function parseDiffMode(arg) {
+  const v = arg?.toLowerCase();
+  if (!v || !VALID_DIFF_MODES.includes(v)) {
+    return { ok: false, error: `Usage: /advisor diff <${VALID_DIFF_MODES.join("|")}>` };
+  }
+  return { ok: true, patch: { diffMode: v } };
+}
+
+/** Parse /advisor strip-reasoning <on|off>. Returns stripReasoning patch or error. */
+export function parseStripReasoning(arg) {
+  const v = arg?.toLowerCase();
+  if (v !== "on" && v !== "off") {
+    return { ok: false, error: `Usage: /advisor strip-reasoning on|off` };
+  }
+  return { ok: true, patch: { stripReasoning: v === "on" } };
+}
+
+/**
+ * Parse /advisor summary-model <executor|off|provider/id>.
+ * findModel checks the registry (injected by the handler to avoid pi dependency).
+ * Returns summaryModel patch or error.
+ */
+export function parseSummaryModel(arg, findModel) {
+  if (!arg) {
+    return { ok: false, error: `Usage: /advisor summary-model executor|off|<provider/id>` };
+  }
+  if (arg === "executor") return { ok: true, patch: { summaryModel: "executor" } };
+  if (arg === "off") return { ok: true, patch: { summaryModel: null } };
+
+  // provider/id — validate spec shape and registry presence
+  const slashIdx = arg.indexOf("/");
+  if (slashIdx <= 0 || slashIdx === arg.length - 1) {
+    return { ok: false, error: `Unknown summary model "${arg}". Use "executor", "off", or provider/id.` };
+  }
+  const provider = arg.slice(0, slashIdx);
+  const id = arg.slice(slashIdx + 1);
+  if (!findModel(provider, id)) {
+    return { ok: false, error: `Unknown summary model "${arg}" (not in registry).` };
+  }
+  return { ok: true, patch: { summaryModel: arg } };
 }

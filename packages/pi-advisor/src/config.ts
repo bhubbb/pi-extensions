@@ -340,7 +340,18 @@ export function resolveEffectiveConfig(cwd: string, projectTrusted = true): Effe
     keepToolResults: project.keepToolResults ?? global.keepToolResults ?? DEFAULTS.keepToolResults,
     diffMode: downgradeDiffMode(envDiffMode() ?? project.diffMode ?? global.diffMode ?? DEFAULTS.diffMode),
     diffMaxChars: project.diffMaxChars ?? global.diffMaxChars ?? DEFAULTS.diffMaxChars,
-    summaryModel: envSummaryModel() ?? project.summaryModel ?? global.summaryModel ?? DEFAULTS.summaryModel,
+    // Use explicit undefined check (not ??) so summaryModel: null (off) is not
+    // treated as "not set" and falling through to global/default.
+    summaryModel: (() => {
+      const e = envSummaryModel();
+      return e !== undefined
+        ? e
+        : project.summaryModel !== undefined
+          ? project.summaryModel
+          : global.summaryModel !== undefined
+            ? global.summaryModel
+            : DEFAULTS.summaryModel;
+    })(),
     summaryMaxTokens: project.summaryMaxTokens ?? global.summaryMaxTokens ?? DEFAULTS.summaryMaxTokens,
     summaryRefreshEvery: project.summaryRefreshEvery ?? global.summaryRefreshEvery ?? DEFAULTS.summaryRefreshEvery,
     summaryTimeoutMs: project.summaryTimeoutMs ?? global.summaryTimeoutMs ?? DEFAULTS.summaryTimeoutMs,
@@ -402,4 +413,74 @@ export function contextProjectTrusted(
 ): boolean {
   const fn = (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted;
   return typeof fn === "function" ? fn.call(ctx) : true;
+}
+
+// ── Subcommand validators (pure functions, testable, zero side effects) ──────
+// Each returns { patch: AdvisorConfig } on success or { error: string } on failure.
+// The handler dispatches to these, then calls pickScope() → persist() → notify().
+
+export type AdvisorPatchResult = { ok: true; patch: AdvisorConfig } | { ok: false; error: string };
+
+/** Parse /advisor context <mode>. Returns contextMode patch or error. */
+export function parseContextMode(arg: string | undefined): AdvisorPatchResult {
+  const v = arg?.toLowerCase();
+  if (!v || !(VALID_CONTEXT_MODES as readonly string[]).includes(v)) {
+    return { ok: false, error: `Usage: /advisor context <${VALID_CONTEXT_MODES.join("|")}>` };
+  }
+  return { ok: true, patch: { contextMode: v as ContextMode } };
+}
+
+/** Parse /advisor tail <N>. Returns tailMessages patch or error. */
+export function parseTailMessages(arg: string | undefined): AdvisorPatchResult {
+  const n = arg !== undefined ? Number(arg) : NaN;
+  if (!Number.isInteger(n) || n < 2) {
+    return { ok: false, error: `Usage: /advisor tail <N>  (integer >= 2)` };
+  }
+  return { ok: true, patch: { tailMessages: n } };
+}
+
+/** Parse /advisor diff <mode>. Returns diffMode patch or error. */
+export function parseDiffMode(arg: string | undefined): AdvisorPatchResult {
+  const v = arg?.toLowerCase();
+  if (!v || !(VALID_DIFF_MODES as readonly string[]).includes(v)) {
+    return { ok: false, error: `Usage: /advisor diff <${VALID_DIFF_MODES.join("|")}>` };
+  }
+  return { ok: true, patch: { diffMode: v as DiffMode } };
+}
+
+/** Parse /advisor strip-reasoning <on|off>. Returns stripReasoning patch or error. */
+export function parseStripReasoning(arg: string | undefined): AdvisorPatchResult {
+  const v = arg?.toLowerCase();
+  if (v !== "on" && v !== "off") {
+    return { ok: false, error: `Usage: /advisor strip-reasoning on|off` };
+  }
+  return { ok: true, patch: { stripReasoning: v === "on" } };
+}
+
+/**
+ * Parse /advisor summary-model <executor|off|provider/id>.
+ * findModel checks the registry (injected by the handler to avoid pi dependency).
+ * Returns summaryModel patch or error.
+ */
+export function parseSummaryModel(
+  arg: string | undefined,
+  findModel: (provider: string, id: string) => boolean,
+): AdvisorPatchResult {
+  if (!arg) {
+    return { ok: false, error: `Usage: /advisor summary-model executor|off|<provider/id>` };
+  }
+  if (arg === "executor") return { ok: true, patch: { summaryModel: "executor" } };
+  if (arg === "off") return { ok: true, patch: { summaryModel: null } };
+
+  // provider/id — validate spec shape and registry presence
+  const slashIdx = arg.indexOf("/");
+  if (slashIdx <= 0 || slashIdx === arg.length - 1) {
+    return { ok: false, error: `Unknown summary model "${arg}". Use "executor", "off", or provider/id.` };
+  }
+  const provider = arg.slice(0, slashIdx);
+  const id = arg.slice(slashIdx + 1);
+  if (!findModel(provider, id)) {
+    return { ok: false, error: `Unknown summary model "${arg}" (not in registry).` };
+  }
+  return { ok: true, patch: { summaryModel: arg } };
 }

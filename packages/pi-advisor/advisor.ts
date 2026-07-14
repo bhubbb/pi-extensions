@@ -976,6 +976,11 @@ export default function advisorExtension(pi: ExtensionAPI) {
             "  /advisor on-done on|off        — toggle auto-review on finish → choose scope\n" +
             "  /advisor on-todo on|off        — toggle auto-review on todo completion → choose scope\n" +
             "  /advisor when-stuck off|<N>    — trigger advisor on N consecutive errors or N repeated identical tool calls → choose scope\n" +
+            `  /advisor context ${CONTEXT_MODES.join("|")}    — set context mode → choose scope\n` +
+            "  /advisor tail <N>              — set tail message count (>=2) → choose scope\n" +
+            `  /advisor diff ${DIFF_MODES.join("|")}  — set diff mode → choose scope\n` +
+            "  /advisor strip-reasoning on|off — toggle reasoning stripping → choose scope\n" +
+            "  /advisor summary-model executor|off|<provider/id> — set summary model → choose scope\n" +
             "  /advisor status                — show resolved configuration\n" +
             "  /advisor ?                     — show this help",
           "info",
@@ -1041,6 +1046,75 @@ export default function advisorExtension(pi: ExtensionAPI) {
         if (!file) return;
         persist(file, { whenStuck: n });
         return ctx.ui.notify(`Auto-consult after ${n || "off"} consecutive tool errors or repeated identical tool calls.`, "info");
+      }
+
+      // Policy setters — dispatched BEFORE the model-spec parser so subcommand
+      // names like "summary-model" are not misread as provider/id specs.
+      if (head === "context") {
+        const v = tokens[1]?.toLowerCase();
+        if (!(CONTEXT_MODES as readonly string[]).includes(v)) {
+          return ctx.ui.notify(`Usage: /advisor context <${CONTEXT_MODES.join("|")}>`, "error");
+        }
+        const file = await pickScope();
+        if (!file) return;
+        persist(file, { contextMode: v as ContextMode });
+        return ctx.ui.notify(`Context mode: ${v}.`, "info");
+      }
+      if (head === "tail") {
+        const n = Number(tokens[1]);
+        if (!Number.isInteger(n) || n < 2) {
+          return ctx.ui.notify("Usage: /advisor tail <N>  (integer >= 2)", "error");
+        }
+        const file = await pickScope();
+        if (!file) return;
+        persist(file, { tailMessages: n });
+        return ctx.ui.notify(`Tail messages: ${n}.`, "info");
+      }
+      if (head === "diff") {
+        const v = tokens[1]?.toLowerCase();
+        if (!(DIFF_MODES as readonly string[]).includes(v)) {
+          return ctx.ui.notify(`Usage: /advisor diff <${DIFF_MODES.join("|")}>`, "error");
+        }
+        const file = await pickScope();
+        if (!file) return;
+        persist(file, { diffMode: v as DiffMode });
+        return ctx.ui.notify(`Diff mode: ${v}.`, "info");
+      }
+      if (head === "strip-reasoning") {
+        const v = tokens[1]?.toLowerCase();
+        if (v !== "on" && v !== "off") {
+          return ctx.ui.notify("Usage: /advisor strip-reasoning on|off", "error");
+        }
+        const file = await pickScope();
+        if (!file) return;
+        persist(file, { stripReasoning: v === "on" });
+        return ctx.ui.notify(`Strip reasoning: ${v}.`, "info");
+      }
+      if (head === "summary-model") {
+        const v = tokens[1];
+        if (!v) {
+          return ctx.ui.notify("Usage: /advisor summary-model executor|off|<provider/id>", "error");
+        }
+        let resolved: string | null;
+        if (v === "executor") {
+          resolved = "executor";
+        } else if (v === "off") {
+          resolved = null;
+        } else {
+          // provider/id — verify spec shape and registry presence
+          const parsed = parseSpec(v);
+          if (!parsed) {
+            return ctx.ui.notify(`Unknown summary model "${v}". Use "executor", "off", or provider/id.`, "error");
+          }
+          if (!ctx.modelRegistry.find(parsed.provider, parsed.id)) {
+            return ctx.ui.notify(`Unknown summary model "${v}" (not in registry).`, "error");
+          }
+          resolved = v;
+        }
+        const file = await pickScope();
+        if (!file) return;
+        persist(file, { summaryModel: resolved });
+        return ctx.ui.notify(`Summary model: ${resolved ?? "off"}.`, "info");
       }
 
       // Model setters.
