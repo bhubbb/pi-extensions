@@ -23,8 +23,7 @@
   },
   "homepage": "https://github.com/bhubbb/pi-extensions",
   "files": [
-    "packages/pi-advisor",
-    "README.md"
+    "packages/pi-advisor"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.80.2",
@@ -42,14 +41,16 @@
   },
   "pi": {
     "extensions": [
-      "./packages/pi-advisor/advisor.ts"
+      "./packages/pi-advisor/advisor.ts",
+      "./packages/pi-todo/src/index.ts"
     ]
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun run typecheck:advisor && bun run typecheck:llama && bun run typecheck:llama-stats",
+    "typecheck": "bun run typecheck:advisor && bun run typecheck:llama && bun run typecheck:llama-stats && bun run typecheck:pi-todo",
     "typecheck:advisor": "tsc -p packages/pi-advisor/tsconfig.json",
     "typecheck:llama": "tsc -p packages/pi-llama/tsconfig.json",
-    "typecheck:llama-stats": "tsc -p packages/pi-llama-stats/tsconfig.json"
+    "typecheck:llama-stats": "tsc -p packages/pi-llama-stats/tsconfig.json",
+    "typecheck:pi-todo": "tsc -p packages/pi-todo/tsconfig.json"
   }
 }

@@ -2,9 +2,10 @@
 
 ## Stack
 
-- **Runtime / package manager / test runner: Bun.** All `*.test.ts` under `packages/*/tests/` are run by `bun test`. No `tsc` compile step in the test pipeline.
+- **Runtime / package manager / test runner: Bun.** All `*.test.ts` under `packages/*/tests/` are run by `bun test`. No `tsc` compile step in the test pipeline. **Everything in this monorepo uses Bun — no npm, no yarn, no pnpm.**
 - **Type checking: `tsc --noEmit`** per package, composed by `bun run typecheck` at the root.
 - **Lint/format in CI: `oxfmt` + `oxlint`** via `npx` (unchanged).
+- **Test framework: `bun:test` only.** No vitest, jest, or other test runners. Port any external packages to `bun:test`.
 
 ## Workflow
 
