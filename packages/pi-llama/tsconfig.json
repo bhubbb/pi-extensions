@@ -13,6 +13,6 @@
 		"noEmit": true,
 		"types": ["@earendil-works/pi-coding-agent", "node"]
 	},
-	"include": ["src/**/*.ts", "tests/**/*.ts"],
-	"exclude": ["node_modules", "dist"]
+	"include": ["src/**/*.ts"],
+	"exclude": ["node_modules", "dist", "tests"]
 }

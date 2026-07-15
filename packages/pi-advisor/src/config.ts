@@ -318,11 +318,9 @@ export function resolveEffectiveConfig(cwd: string, projectTrusted = true): Effe
   }
 
   const downgradeDiffMode = (dm: DiffMode): DiffMode => {
-    if (!projectTrusted && (dm === "git-stat" || dm === "git-snippets")) {
-      console.warn(`[pi-advisor] Downgrading diffMode "${dm}" to "${GIT_MODE_DOWNGRADE[dm]}" (project not trusted)`);
-      return GIT_MODE_DOWNGRADE[dm];
-    }
-    return dm;
+    // Delegate to normalizeDiffMode; warning is suppressed here (only surfaced
+    // when the user sets the mode directly via /advisor diff).
+    return normalizeDiffMode(dm, projectTrusted).effectiveMode;
   };
 
   return {
@@ -446,6 +444,24 @@ export function parseDiffMode(arg: string | undefined): AdvisorPatchResult {
     return { ok: false, error: `Usage: /advisor diff <${VALID_DIFF_MODES.join("|")}>` };
   }
   return { ok: true, patch: { diffMode: v as DiffMode } };
+}
+
+/**
+ * Downgrade git-* diff modes to non-git variants when project is untrusted.
+ * Returns the effective diff mode and a warning string (or undefined).
+ */
+export function normalizeDiffMode(
+  mode: DiffMode,
+  projectTrusted: boolean,
+): { effectiveMode: DiffMode; warning?: string } {
+  if (!projectTrusted && (mode === "git-stat" || mode === "git-snippets")) {
+    const fallback: DiffMode = mode === "git-stat" ? "stat" : "snippets";
+    return {
+      effectiveMode: fallback,
+      warning: `[pi-advisor] downgraded diffMode "${mode}" → "${fallback}" (project not trusted)`,
+    };
+  }
+  return { effectiveMode: mode };
 }
 
 /** Parse /advisor strip-reasoning <on|off>. Returns stripReasoning patch or error. */

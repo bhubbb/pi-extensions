@@ -21,7 +21,7 @@ import type { Model, Api } from "@earendil-works/pi-ai";
 const MAX_TOOL_CALL_ARGS_CHARS = 800;
 const MAX_TOOL_RESULT_CHARS = 2000;
 
-function truncate(text: string, maxChars: number): string {
+export function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars) + `\n…[truncated ${text.length - maxChars} chars]`;
 }
@@ -45,7 +45,7 @@ type RenderOpts = {
   skipToolResult?: boolean; // for tail selection logic
 };
 
-function renderEntry(entry: AnyEntry, opts: RenderOpts): string | null {
+export function renderEntry(entry: AnyEntry, opts: RenderOpts): string | null {
   if (entry.type !== "message" || !entry.message?.role) return null;
   const msg = entry.message;
 
