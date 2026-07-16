@@ -12,6 +12,7 @@
 - Use `todo` for multi-step work. Mark `in_progress` before starting, `completed` immediately when done.
 - BoringOps: prefer simple, predictable operations over clever or fragile ones. Run `bun test` and `bun run typecheck` before committing.
 - Consult the advisor before substantive work and when stuck. Push back on its claims if evidence contradicts them.
+- **Manual pi launch test after plugin changes.** After making changes to or adding a new extension plugin, launch `pi` manually (e.g. `pi` in the terminal) to confirm it starts cleanly and the extension loads without runtime errors. Unit tests and typecheck alone don't catch TUI rendering or lifecycle bugs.
 
 ## Testing
 
@@ -39,6 +40,10 @@
 - Conventional Commits. `feat`, `fix`, `chore`, `docs`, `refactor`, `perf`, `test`, `ci`, `build`, `style`.
 - Keep descriptions imperative and brief.
 - License new packages MIT unless there's a reason otherwise.
+
+## Gotchas
+
+`@docs/gotchas.md`
 
 ## Hermeticity (critical)
 
