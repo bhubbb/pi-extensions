@@ -1,9 +1,76 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { formatGoalStatusLabel, formatStatusLabel } from "../state/i18n-bridge.js";
-import { selectGoalTitleById, selectTaskSubjectById } from "../state/selectors.js";
+import { selectGoalIconState, selectGoalTaskCounts, selectGoalTitleById, selectTaskSubjectById, selectActiveGoals, selectDerivedGoalCounts, selectTasksByGoal, type GoalIconState } from "../state/selectors.js";
 import type { TaskState } from "../state/state.js";
 import type { Action, Goal, GoalStatus, Task, TaskAction, TaskDetails, TaskMutationParams, TaskStatus } from "../tool/types.js";
+
+// ---------------------------------------------------------------------------
+// Nested overlay layout
+// ---------------------------------------------------------------------------
+
+/**
+ * Render the nested goals section as plain-text lines (no theme coloring).
+ * Used for unit-testing the tree layout; the overlay calls this and applies theme.
+ *
+ * Returns the goal lines and task lines with correct tree connectors:
+ *
+ *   ○ Goals (0/2)
+ *   ├─ ○ Goal title (1/3)
+ *   │  ├─ ✓ Task 1
+ *   │  ├─ ◐ Task 2
+ *   │  └─ ○ Task 3
+ *   └─ ✓ Done goal (2/2)
+ *      ├─ ✓ Task A
+ *      └─ ✓ Task B
+ */
+export function renderNestedGoalsLayout(
+  state: TaskState,
+  hiddenTaskIds: ReadonlySet<number>,
+): { heading: string; goalGroups: { goalLine: string; taskLines: string[] }[] } {
+  const activeGoals = selectActiveGoals(state);
+  // Use derived counts (based on task progress) to stay consistent with goal icons
+  const derivedCounts = selectDerivedGoalCounts(state);
+  const goalRatio = derivedCounts.total > 0 ? `${derivedCounts.completed}/${derivedCounts.total}` : "0";
+
+  // Derive heading glyph from goal aggregate (same logic as goal icons)
+  const headingGlyph = derivedCounts.inProgress > 0 ? "◐" : derivedCounts.completed > 0 ? "✓" : "○";
+  const heading = `${headingGlyph} Goals (${goalRatio})`;
+
+  const goalGroups: { goalLine: string; taskLines: string[] }[] = [];
+
+  for (let gi = 0; gi < activeGoals.length; gi++) {
+    const goal = activeGoals[gi];
+    const isLastGoal = gi === activeGoals.length - 1;
+    const goalConnector = isLastGoal ? "└─" : "├─";
+
+    // Goal icon derived from task statuses
+    const iconState = selectGoalIconState(state, goal.id);
+    const counts = selectGoalTaskCounts(state, goal.id);
+    const goalGlyph = GOAL_ICON_GLYPH[iconState].glyph;
+    const goalLine = `${goalConnector} ${goalGlyph} ${goal.title} (${counts.completed}/${counts.total})`;
+
+    // Visible tasks for this goal (not deleted, not hidden)
+    const goalTasks = selectTasksByGoal(state, goal.id).filter((t) => !hiddenTaskIds.has(t.id));
+    const taskLines: string[] = [];
+    for (let ti = 0; ti < goalTasks.length; ti++) {
+      const task = goalTasks[ti];
+      const isLastTask = ti === goalTasks.length - 1;
+      const prefix = isLastGoal ? "   " : "│  ";
+      const taskConnector = isLastTask ? "└─" : "├─";
+      const taskGlyph = task.status === "completed" ? "✓" : task.status === "in_progress" ? "◐" : "○";
+      let taskLine = `${prefix}${taskConnector} ${taskGlyph} #${task.id} ${task.subject}`;
+      if (task.status === "in_progress" && task.activeForm) {
+        taskLine += ` (${task.activeForm})`;
+      }
+      taskLines.push(taskLine);
+    }
+
+    goalGroups.push({ goalLine, taskLines });
+  }
+
+  return { heading, goalGroups };
+}
 
 // ---------------------------------------------------------------------------
 // Status presentation tables
@@ -80,8 +147,18 @@ export function formatOverlayTaskLine(t: Task, theme: Theme, showId: boolean, go
   return line;
 }
 
+/** Glyph + color for a goal icon state (same three states as tasks). */
+export const GOAL_ICON_GLYPH: Record<GoalIconState, { glyph: string; color: "dim" | "warning" | "success" }> = {
+  not_started: { glyph: "○", color: "dim" },
+  in_progress: { glyph: "◐", color: "warning" },
+  done: { glyph: "✓", color: "success" },
+};
+
+/** Maximum lines the widget can render before truncation. */
+export const MAX_WIDGET_LINES = 12;
+
 /**
- * Format a single goal for the overlay.
+ * Format a single goal for the overlay (flat listing — kept for /todos command compat).
  */
 export function formatOverlayGoalLine(g: Goal, theme: Theme): string {
   const icon = g.status === "active"
@@ -92,6 +169,20 @@ export function formatOverlayGoalLine(g: Goal, theme: Theme): string {
   const titleColor = g.status === "active" ? "text" : "dim";
   const fileTag = g.file ? ` ${theme.fg("borderMuted", `(file: ${g.file})`)}` : "";
   return `${icon} ${theme.fg("accent", `G#${g.id}`)} ${theme.fg(titleColor, g.title)}${fileTag}`;
+}
+
+/**
+ * Format a goal header line for the nested overlay view.
+ * Shows icon derived from task progress, title, and (completed/total) count.
+ */
+export function formatNestedGoalLine(g: Goal, state: TaskState, theme: Theme): string {
+  const iconState = selectGoalIconState(state, g.id);
+  const iconDef = GOAL_ICON_GLYPH[iconState];
+  const counts = selectGoalTaskCounts(state, g.id);
+  const icon = theme.fg(iconDef.color, iconDef.glyph);
+  const titleColor = g.status === "active" ? "text" : "dim";
+  const count = theme.fg("muted", `(${counts.completed}/${counts.total})`);
+  return `${icon} ${theme.fg(titleColor, g.title)} ${count}`;
 }
 
 /**

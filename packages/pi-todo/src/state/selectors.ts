@@ -121,3 +121,51 @@ export function selectHasActive(state: TaskState): boolean {
 }
 
 export const ACTIVE_STATUSES: ReadonlySet<TaskStatus> = new Set(["pending", "in_progress"]);
+
+/**
+ * Derived icon state for a goal based on its tasks.
+ * `done` — all tasks completed (or no tasks)
+ * `in_progress` — any task is in_progress
+ * `not_started` — otherwise
+ */
+export type GoalIconState = "not_started" | "in_progress" | "done";
+
+/**
+ * Derive a goal's icon state from its visible tasks.
+ * This lets the overlay show ◐ / ✓ / ○ for goals the same way it does for tasks.
+ */
+export function selectGoalIconState(state: TaskState, goalId: number): GoalIconState {
+  const tasks = selectTasksByGoal(state, goalId);
+  if (tasks.length === 0) return "not_started";
+  if (tasks.some((t) => t.status === "in_progress")) return "in_progress";
+  if (tasks.every((t) => t.status === "completed")) return "done";
+  return "not_started";
+}
+
+/** Completed / total task counts for a single goal. */
+export function selectGoalTaskCounts(state: TaskState, goalId: number): { completed: number; total: number } {
+  const tasks = selectTasksByGoal(state, goalId);
+  const completed = tasks.filter((t) => t.status === "completed").length;
+  return { completed, total: tasks.length };
+}
+
+/**
+ * Derived goal counts based on task progress (not explicit goal status).
+ * Used for the heading glyph/ratio to stay consistent with goal icons.
+ * - completed: goals where all tasks are completed
+ * - inProgress: goals where any task is in_progress
+ * - notStarted: all other active goals
+ */
+export function selectDerivedGoalCounts(state: TaskState): { total: number; completed: number; inProgress: number; notStarted: number } {
+  const active = selectActiveGoals(state);
+  let completed = 0;
+  let inProgress = 0;
+  let notStarted = 0;
+  for (const goal of active) {
+    const iconState = selectGoalIconState(state, goal.id);
+    if (iconState === "done") completed++;
+    else if (iconState === "in_progress") inProgress++;
+    else notStarted++;
+  }
+  return { total: active.length, completed, inProgress, notStarted };
+}
